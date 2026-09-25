@@ -20,7 +20,7 @@ coding client
     ▼
 Router Kely
     ├─ authenticate key from an in-memory hash table
-    ├─ check the owning user's in-memory monthly usage
+    ├─ check the owning user's in-memory current-day usage
     ├─ replace one top-level JSON property: model
     ├─ stream the request to DeepSeek
     ├─ stream the response back without rewriting it
@@ -37,7 +37,7 @@ The MVP is successful when:
 - The measured incremental proxy overhead is below 1 ms at p99 under the benchmark conditions in section 18.
 - The service stays below 250 MiB RSS with a 1-vCPU limit under the required workload.
 - No inference request performs a database call, waits for accounting, buffers a complete body, or constructs an OpenAI request/response object graph.
-- Users, keys, monthly quotas, usage, and the two model aliases are understandable without teams or inheritance rules.
+- Users, keys, daily quotas, usage, and the two model aliases are understandable without teams or inheritance rules.
 
 ### 1.2 Normative language
 
@@ -50,7 +50,8 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Topic | Decision |
 |---|---|
 | Organization model | Users only. No teams, organizations, memberships, or inheritance. |
-| Quota scope | One monthly monetary quota per user, shared by all that user's keys. |
+| Quota scope | One daily monetary quota per user, shared by all that user's keys. |
+| Quota period | One UTC calendar day; usage resets at each 00:00:00Z boundary. |
 | Keys | Credentials only; a key has no quota or model policy. |
 | Roles | `admin` and `user`. |
 | Upstreams | One DeepSeek base URL and API credential. |
@@ -75,12 +76,12 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 
 - Authenticate high-entropy bearer API keys in O(1) expected time.
 - Reject disabled/revoked keys and disabled users.
-- Enforce one user-level monthly quota using integer nano-US-dollar accounting.
+- Enforce one user-level daily quota using integer nano-US-dollar accounting.
 - Advertise two public model aliases.
 - Rewrite only the top-level request `model` value and forward unknown JSON fields unchanged.
 - Proxy streaming and non-streaming Chat Completions and Responses requests.
 - Observe usage fields without delaying or modifying response bytes.
-- Persist hourly/monthly aggregate usage asynchronously.
+- Persist hourly and daily aggregate usage asynchronously.
 - Provide minimal LiteLLM-compatible model, key, user, usage, and key-management endpoints.
 - Provide an admin/user web UI under `/ui`.
 - Provide readiness, liveness, metrics, and safe operational logs.
@@ -132,7 +133,7 @@ An inference handler may depend only on preconstructed singleton services and im
 
 1. Parse and validate configuration. Refuse startup on missing secrets, duplicate aliases, invalid prices, or a non-HTTPS upstream unless explicitly in development mode.
 2. Open PostgreSQL and run schema compatibility checks. Production startup MUST NOT silently run destructive migrations.
-3. Load enabled users, active keys, current UTC-month aggregates, and the control-plane version into a new runtime snapshot.
+3. Load enabled users, active keys, current UTC-day aggregates, and the control-plane version into a new runtime snapshot.
 4. Create the singleton `SocketsHttpHandler` and `HttpClient`.
 5. Verify that the configured upstream base URI is syntactically valid. A network call is not required for liveness.
 6. Start the accounting flusher and control-state poller.
@@ -254,7 +255,7 @@ Data-plane errors use:
 | 404 | `model_not_found` | Alias is not configured/enabled. |
 | 413 | `request_too_large` | Body limit exceeded. |
 | 415 | `unsupported_media_type` | Not `application/json` or request content encoding is not identity. |
-| 429 | `quota_exceeded` | Confirmed monthly usage is at or above quota. |
+| 429 | `quota_exceeded` | Confirmed current-day usage is at or above quota. |
 | 429 | `too_many_requests` | Local concurrency cap reached. |
 | 502 | `upstream_error` | Connection/protocol failure before upstream headers. |
 | 504 | `upstream_timeout` | Header or inactivity timeout. |
@@ -427,7 +428,7 @@ All browser UI routes live under `/ui`:
 |---|---|
 | `/ui/login` | Paste an existing Router Kely key to begin a browser session. |
 | `/ui` | Redirect to dashboard. |
-| `/ui/dashboard` | Own monthly usage, quota, remaining amount, model split. |
+| `/ui/dashboard` | Own daily usage, quota, remaining amount, model split. |
 | `/ui/keys` | Own key list; create, rename, revoke. |
 | `/ui/admin/users` | Admin user list with usage/quota/status. |
 | `/ui/admin/users/{id}` | Admin edit user and manage that user's keys. |
@@ -471,9 +472,10 @@ HTML forms may post to compiled handlers under `/ui/actions/*`. A separate broad
 
 ### 11.1 Definition
 
-- Quota is an integer `quota_nano_usd` on the user.
+- Quota is an integer `quota_nano_usd` on the user, applied per UTC calendar day.
 - `NULL` means unlimited. Zero means no billable requests are admitted.
-- The accounting period is a calendar month in UTC, keyed by its first UTC date.
+- The accounting period is a calendar day in UTC, keyed by its date, starting at 00:00:00Z.
+- Confirmed usage resets to zero at each UTC day boundary; the previous day's totals remain for reporting.
 - All a user's keys share the same confirmed usage counter.
 - Quota has no inheritance and no per-key or per-model override.
 
@@ -481,7 +483,7 @@ Admission pseudocode:
 
 ```text
 if user disabled: reject 403
-usage = atomic read confirmedCostForCurrentUtcMonth
+usage = atomic read confirmedCostForCurrentUtcDay
 if quota is not null and usage >= quota: reject 429
 if per-user or process concurrency slot unavailable: reject 429
 admit request
@@ -495,6 +497,8 @@ The quota is a soft admission boundary, not a prepaid ledger reservation. Multip
 
 For one process, overshoot is bounded by the actual cost of requests already in flight at the crossing. Per-user concurrency defaults to 32 to bound exposure. No request is terminated mid-stream when the quota is crossed.
 
+A daily window is short: a small number of large requests MAY exhaust a user's quota for the remainder of the UTC day, after which admissions fail until the next day boundary. The daily period bounds accumulated exposure; it does not smooth spend across days.
+
 Exact hard monetary enforcement is explicitly rejected for MVP because it would require one or more of: request tokenization, pessimistic maximum-cost reservation, a distributed transactional counter, or terminating valid streams. Those add latency, memory, complexity, or surprising behavior.
 
 ### 11.3 Multiple replicas
@@ -503,9 +507,9 @@ The certified MVP uses one replica. With multiple replicas, each replica admits 
 
 Hard cross-replica quotas are a post-MVP feature and MUST NOT be approximated with a database call per request.
 
-### 11.4 Month rollover
+### 11.4 Day rollover
 
-Every admission compares a cached UTC month key. The first request after rollover atomically switches the user's current-month counter to the new month under a rare slow-path lock or compare/exchange initialization. The old bucket remains available to the flusher. A periodic background tick performs the same rollover even with no requests.
+Every admission compares a cached UTC day key. The first request after rollover atomically switches the user's current-day counter to the new day under a rare slow-path lock or compare/exchange initialization. The previous day's bucket remains available to the flusher and to reporting. A periodic background tick performs the same rollover even with no requests.
 
 ## 12. Accounting and durability
 
@@ -550,7 +554,7 @@ Default flush interval is 1 second; also flush when 1,000 completions have accum
 3. Begins a PostgreSQL transaction.
 4. Inserts the batch identity into `usage_flushes`.
 5. If the identity already exists, treats the batch as committed and discards it.
-6. Otherwise upserts hourly and monthly aggregates, updates approximate key `last_used_at`, then commits.
+6. Otherwise upserts hourly and daily aggregates, updates approximate key `last_used_at`, then commits.
 7. On definite rollback/failure, retains the same batch and retries with exponential delay capped at 5 seconds.
 8. On uncertain commit outcome, retries the same identity; the unique marker makes the operation idempotent.
 
@@ -566,7 +570,7 @@ No local WAL is used in MVP because synchronous disk I/O violates the hot-path o
 
 On startup:
 
-- Load current UTC-month per-user totals from `usage_monthly`.
+- Load current UTC-day per-user totals from `usage_daily`.
 - Load users/keys and initialize atomic counters to those totals.
 - Generate a new random `instance_id`; batch sequence starts at 1.
 - Delete `usage_flushes` markers older than 7 days in a background maintenance job.
@@ -634,8 +638,8 @@ CREATE TABLE usage_hourly (
     PRIMARY KEY (period_hour, user_id, key_id, model_alias, outcome_class)
 );
 
-CREATE TABLE usage_monthly (
-    period_month        date NOT NULL,
+CREATE TABLE usage_daily (
+    period_day          date NOT NULL,
     user_id             bigint NOT NULL REFERENCES users(id),
     request_count       bigint NOT NULL,
     input_tokens        bigint NOT NULL,
@@ -643,7 +647,7 @@ CREATE TABLE usage_monthly (
     output_tokens       bigint NOT NULL,
     cost_nano_usd       bigint NOT NULL,
     usage_missing_count bigint NOT NULL,
-    PRIMARY KEY (period_month, user_id)
+    PRIMARY KEY (period_day, user_id)
 );
 
 CREATE TABLE usage_flushes (
@@ -669,7 +673,7 @@ CREATE INDEX audit_log_occurred_at_idx ON audit_log(occurred_at DESC);
 
 ### 13.2 Retention
 
-- `usage_monthly`: retain indefinitely by default.
+- `usage_daily`: retain 400 days by default; longer reporting periods are derived by aggregating daily rows.
 - `usage_hourly`: retain 400 days by default, purged in small background batches.
 - `audit_log`: retain 400 days by default.
 - `usage_flushes`: 7 days.
@@ -705,10 +709,11 @@ Query parameters are ignored unless discovered as required. Response:
   "models": ["deepseek-fast", "deepseek-pro"],
   "spend": 12.345678,
   "max_budget": 100.0,
-  "budget_reset_at": "2026-10-01T00:00:00Z",
+  "budget_reset_at": "2026-09-26T00:00:00Z",
   "blocked": false,
   "router_kely": {
     "quota_scope": "user",
+    "quota_period": "day",
     "currency": "USD",
     "usage_nano_usd": 12345678000,
     "quota_nano_usd": 100000000000
@@ -716,7 +721,7 @@ Query parameters are ignored unless discovered as required. Response:
 }
 ```
 
-`key` is always masked. `spend` and `max_budget` are JSON numbers derived on this cold path; the integer `router_kely` fields are authoritative. Unlimited quota emits `max_budget: null` and `quota_nano_usd: null`.
+`key` is always masked. `spend` and `max_budget` are JSON numbers derived on this cold path; the integer `router_kely` fields are authoritative. `spend` is the current UTC-day usage, and `budget_reset_at` is the start of the next UTC day. Unlimited quota emits `max_budget: null` and `quota_nano_usd: null`. `quota_period` is always `day` and distinguishes Router Kely's daily window from LiteLLM's monthly `budget_reset_at` convention.
 
 ### 14.3 `GET /user/info`
 
@@ -731,7 +736,7 @@ Response:
     "name": "Developer",
     "spend": 12.345678,
     "max_budget": 100.0,
-    "budget_reset_at": "2026-10-01T00:00:00Z",
+    "budget_reset_at": "2026-09-26T00:00:00Z",
     "models": ["deepseek-fast", "deepseek-pro"]
   },
   "keys": [
@@ -739,6 +744,7 @@ Response:
   ],
   "router_kely": {
     "quota_scope": "user",
+    "quota_period": "day",
     "usage_nano_usd": 12345678000,
     "quota_nano_usd": 100000000000
   }
@@ -1011,7 +1017,7 @@ Benchmark noise must be controlled with warm-up, CPU affinity where available, r
 
 - JSON transformer across every segment boundary, escape sequence, whitespace form, nested misleading `model`, duplicate/missing/non-string model, malformed UTF-8/JSON, and prefix/body limits.
 - Key format, random generation, hashing, equality, lookup, revocation, and malformed header cases.
-- Integer price arithmetic, round-up behavior, cached tokens, overflow rejection, and month boundaries.
+- Integer price arithmetic, round-up behavior, cached tokens, overflow rejection, and day boundaries.
 - Atomic quota behavior with concurrent completions and rollover.
 - SSE/JSON usage observer across every byte boundary and irrelevant content containing the word `usage`.
 - Header stripping and forwarding rules.
@@ -1030,7 +1036,7 @@ Run the published AOT binary with real PostgreSQL and the mock upstream. Verify:
 - Client disconnect cancels upstream.
 - DB outage causes no data-plane DB attempt and eventually trips backlog protection.
 - Batch retry is idempotent after an injected uncertain commit.
-- Restart recovers committed monthly usage and key state.
+- Restart recovers committed daily usage and key state.
 - Control changes are immediately visible locally and within 2 seconds to a second process.
 - Graceful shutdown flushes and abrupt kill loses no more than the documented window.
 - No plaintext key appears in database, logs, metrics, crash output, or HTML after the one-time response.
@@ -1102,7 +1108,7 @@ The MVP is releasable only when all items pass.
 - [ ] User can view own usage/quota and create/rename/revoke only own keys.
 - [ ] No key/team/model quota exists; user quota is the only budget value.
 - [ ] Plaintext keys are shown once and cannot be recovered.
-- [ ] Current-month usage survives restart within the documented one-second crash window.
+- [ ] Current-day usage survives restart within the documented one-second crash window.
 - [ ] LiteLLM profile endpoints return documented schemas and pass captured coding-client fixtures.
 - [ ] `/ui` primary workflows function without JavaScript.
 
@@ -1174,10 +1180,12 @@ Migrate only:
 - user display name and email;
 - role mapping to `admin`/`user`;
 - enabled status;
-- one monthly user quota;
-- optional opening current-month usage balance with an audited migration batch.
+- one daily user quota;
+- optional opening current-day usage balance with an audited migration batch.
 
 Do not migrate teams, memberships, team/key/model budgets, routing rules, fallbacks, provider objects, raw spend logs, or LiteLLM internal IDs. If several LiteLLM budgets exist, an operator must choose the single user quota explicitly; Router Kely does not infer precedence.
+
+A LiteLLM monthly budget is not equivalent to a Router Kely daily quota: copying a monthly amount into a daily value grants roughly 30 times more spend. The operator MUST set the daily value explicitly, and the migration report MUST show the monthly source amount and the chosen daily value.
 
 ### 23.2 Key migration
 
@@ -1193,7 +1201,7 @@ Because secure systems store hashes and different systems may hash/format keys d
 
 ### 23.4 Rollback
 
-Rollback changes routing/DNS to LiteLLM; it does not replay requests. Maintain both gateways' keys during canary or use separate client profiles. Export Router Kely aggregate usage as CSV/JSON if finance needs a combined month, but do not attempt bidirectional live synchronization.
+Rollback changes routing/DNS to LiteLLM; it does not replay requests. Maintain both gateways' keys during canary or use separate client profiles. Export Router Kely aggregate usage as CSV/JSON if finance needs a combined reporting period, but do not attempt bidirectional live synchronization.
 
 ## 24. Repository and implementation constraints
 
