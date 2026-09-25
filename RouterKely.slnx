@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RouterKely.Core/RouterKely.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RouterKely.Unit/RouterKely.Unit.csproj" />
+    <Project Path="tests/RouterKely.Performance/RouterKely.Performance.csproj" />
+  </Folder>
+</Solution>
+
