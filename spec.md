@@ -3,9 +3,11 @@
 **Status:** Implementation-ready MVP specification  
 **Version:** 1.0  
 **Target runtime:** .NET 10 LTS, Linux x64/arm64, Native AOT  
-**Deployment:** one `router-kely` executable/container plus PostgreSQL  
+**Deployment:** one self-contained `router-kely` executable/container; no database or sidecar required
 **Primary upstream:** DeepSeek OpenAI-compatible API  
 **Compatibility goal:** the smallest observed subset of OpenAI and LiteLLM required by the organization's coding clients
+
+> **Global engineering guideline:** Router Kely MUST remain an ultra-high-speed, ultra-low-latency, high-throughput router with a nano memory footprint. Every feature, dependency, abstraction, allocation, retained byte, background task, and persistence choice is subordinate to measured data-plane performance and the smallest practical runtime footprint.
 
 ## 1. Product definition
 
@@ -24,10 +26,10 @@ Router Kely
     ├─ replace one top-level JSON property: model
     ├─ stream the request to DeepSeek
     ├─ stream the response back without rewriting it
-    └─ update atomic counters; PostgreSQL is updated later in batches
+    └─ update bounded in-memory counters
 ```
 
-The control plane is a small server-rendered UI under `/ui`. Administrators manage users and all keys. Normal users see their own usage and quota and manage only their own keys.
+The control plane is a small server-rendered UI under `/ui`. The default identity provider stores users, quotas, and key hashes in one configuration file; an administrator credential is injected through an environment variable. Statistics are bounded and in memory. Optional state providers, beginning with PostgreSQL after MVP, may replace identity storage, statistics storage, or both without changing the data plane.
 
 ### 1.1 Success definition
 
@@ -36,7 +38,7 @@ The MVP is successful when:
 - Existing coding clients can switch from LiteLLM by changing only the base URL, while retaining their Router Kely-issued API key and one of the two advertised aliases.
 - The measured incremental proxy overhead is below 1 ms at p99 under the benchmark conditions in section 18.
 - The service stays below 250 MiB RSS with a 1-vCPU limit under the required workload.
-- No inference request performs a database call, waits for accounting, buffers a complete body, or constructs an OpenAI request/response object graph.
+- No inference request performs external state I/O, waits for accounting, buffers a complete body, or constructs an OpenAI request/response object graph.
 - Users, keys, daily quotas, usage, and the two model aliases are understandable without teams or inheritance rules.
 
 ### 1.2 Normative language
@@ -59,12 +61,14 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Default mapping | `deepseek-fast` → `deepseek-chat`; `deepseek-pro` → `deepseek-reasoner`. Both are configurable. |
 | Inference protocols | OpenAI-compatible Chat Completions and Responses request forwarding. |
 | Response behavior | Preserve upstream status, body bytes, and streaming behavior; do not translate response bodies. |
-| State | PostgreSQL is authoritative persistent state; an immutable in-memory snapshot serves the hot path. |
-| Accounting | Atomic in-memory aggregation and idempotent asynchronous PostgreSQL batch flushes. |
-| Quota strictness | Soft admission limit based on confirmed local usage; explicitly bounded concurrent and crash-window overshoot. |
+| Identity state | Default: one atomically replaced configuration file containing users, quotas, and key hashes, plus one environment-supplied administrator key. |
+| Statistics | Default: bounded in-memory hourly/daily aggregates; loss on restart is accepted. |
+| Optional persistence | A later PostgreSQL adapter may own identity, statistics, or both. It is not part of the default executable or MVP dependency graph. |
+| Provider boundary | Narrow startup/control-plane ports selected at build/startup; no dynamic assembly loading, reflection discovery, or provider call on an inference request. |
+| Quota strictness | Soft admission limit based on confirmed local usage; explicitly bounded concurrent overshoot and explicit default-provider restart-reset semantics. |
 | UI | Server-rendered HTML at `/ui`; no SPA framework, Node.js, or frontend build pipeline. |
 | UI authentication | Existing Router Kely API key exchanged for a short-lived in-memory browser session. No passwords in Router Kely. |
-| ORM | None. Use Npgsql and explicit SQL. |
+| ORM | None. A future PostgreSQL adapter uses Npgsql and explicit SQL. |
 | Cache/broker | None. No Redis, message broker, or worker service. |
 | Process model | One process per container. The certified MVP deployment is one replica. |
 | Runtime | .NET 10 LTS Native AOT with workstation GC. |
@@ -81,7 +85,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 - Rewrite only the top-level request `model` value and forward unknown JSON fields unchanged.
 - Proxy streaming and non-streaming Chat Completions and Responses requests.
 - Observe usage fields without delaying or modifying response bytes.
-- Persist hourly and daily aggregate usage asynchronously.
+- Retain bounded hourly and daily aggregate usage in memory for a configurable few days.
 - Provide minimal LiteLLM-compatible model, key, user, usage, and key-management endpoints.
 - Provide an admin/user web UI under `/ui`.
 - Provide readiness, liveness, metrics, and safe operational logs.
@@ -101,8 +105,8 @@ The MVP MUST NOT include:
 - Per-request accounting records, prompt/response capture, or searchable audit of inference content.
 - Exact hard-stop billing guarantees across concurrent requests or multiple replicas.
 - A public user registration flow, password storage, password reset, email delivery, SSO, or OIDC in MVP.
-- A generic plugin system, embedded scripting, dynamic assemblies, runtime compilation, reflection-based controllers, MVC model binding on `/v1/*`, or Swagger in production.
-- Horizontal scalability certification in MVP. Multiple replicas may run, but quota drift semantics in section 11 apply.
+- A generic/dynamic plugin system, embedded scripting, dynamic assemblies, runtime compilation, reflection-based controllers, MVC model binding on `/v1/*`, or Swagger in production. Explicit compile-time state-provider adapters are allowed.
+- Horizontal scalability certification in MVP. The default provider is single-replica only; section 11 defines the consequences of ignoring that constraint.
 
 Any proposed feature outside section 3.1 requires a measured client trace proving it is needed or a separate post-MVP decision.
 
@@ -119,27 +123,27 @@ Browser ────────────────►│ /ui    server-ren
 Session cookie            │ /internal/ui-api/*                   │
                          │                                       │
 Probe/Prometheus ───────►│ /health/* and /metrics               │
-                         └────────────────┬──────────────────────┘
-                                          │ direct SQL, cold path
-                                          ▼
-                                      PostgreSQL
+                         │ file identity + bounded memory stats  │
+                         └──────────────────────────────────────┘
 ```
+
+An optional PostgreSQL adapter sits behind the same cold-path identity/statistics ports. The default process does not reference or load it.
 
 ### 4.1 Hot-path dependency rule
 
-An inference handler may depend only on preconstructed singleton services and immutable/atomic in-memory state. It MUST NOT resolve scoped services, access PostgreSQL, acquire a contended application lock, await an accounting queue, perform DNS/TLS setup for every request, or call another internal HTTP endpoint.
+An inference handler may depend only on preconstructed singleton services and immutable/atomic in-memory state. It MUST NOT resolve scoped services, call a state provider, touch a configuration file or database, acquire a contended application lock, await an accounting queue, perform DNS/TLS setup for every request, or call another internal HTTP endpoint.
 
 ### 4.2 Startup sequence
 
 1. Parse and validate configuration. Refuse startup on missing secrets, duplicate aliases, invalid prices, or a non-HTTPS upstream unless explicitly in development mode.
-2. Open PostgreSQL and run schema compatibility checks. Production startup MUST NOT silently run destructive migrations.
-3. Load enabled users, active keys, current UTC-day aggregates, and the control-plane version into a new runtime snapshot.
+2. Load and validate the configured identity provider. By default, read the identity file and hash the environment-supplied administrator key directly into the snapshot.
+3. Initialize empty current-day and historical in-memory aggregates. A restart intentionally starts usage at zero for the default statistics provider.
 4. Create the singleton `SocketsHttpHandler` and `HttpClient`.
 5. Verify that the configured upstream base URI is syntactically valid. A network call is not required for liveness.
-6. Start the accounting flusher and control-state poller.
+6. Start the UTC rollover/retention tick and, when enabled, the identity-file watcher.
 7. Mark readiness true and begin accepting traffic.
 
-If PostgreSQL is unavailable at initial startup, readiness remains false and inference is not served. Once a valid snapshot exists, a later PostgreSQL outage does not stop inference; health reports degraded and accounting remains in memory within the limits in section 12.
+If the identity file is absent, unreadable, malformed, or contains duplicate IDs/hashes, readiness remains false and inference is not served. The last valid snapshot remains active after a failed live reload. Optional providers define their own startup health without changing these data-plane rules.
 
 ### 4.3 Runtime snapshot
 
@@ -155,7 +159,7 @@ RuntimeSnapshot
 
 `AuthRecord` contains numeric key/user IDs and references the owning `UserRuntimeState`. `UserRuntimeState` contains enabled/role/quota data plus mutable atomic counters stored separately from the immutable identity/configuration fields. Snapshot publication MUST be atomic. Readers never lock.
 
-Control-plane changes commit to PostgreSQL first, build or patch a fresh snapshot, and then publish it. Other processes discover changes by polling the singleton `control_state.version` once per second. PostgreSQL `LISTEN/NOTIFY` MAY reduce propagation time but MUST NOT be the sole invalidation mechanism.
+Control-plane changes go through the selected identity provider, then build and publish a fresh snapshot. The default file provider serializes mutations, writes a complete replacement file with owner-only permissions, atomically renames it over the configured file, and only then publishes the new snapshot. External file replacements are debounced, fully validated, and atomically published; invalid changes leave the last valid snapshot active.
 
 ## 5. Runtime and build profile
 
@@ -179,9 +183,10 @@ Native AOT is the release profile, not an optional optimization. Development may
 Allowed production dependencies should be limited to:
 
 - ASP.NET Core shared/native runtime components used by minimal APIs and Kestrel.
-- Npgsql.
 - A small source-generated HTML/template mechanism or compiled Razor components proven AOT-safe. Plain compiled HTML rendering is preferred.
 - A cryptographic library only if not already supplied by the BCL.
+
+The default executable MUST NOT depend on a database client. A future PostgreSQL adapter may add Npgsql in a separate project/package included only in the PostgreSQL build/profile.
 
 Every added package requires evidence of Native AOT compatibility, retained-size impact, steady-state allocation impact, and necessity. A dependency that introduces runtime reflection on the inference path is rejected.
 
@@ -389,8 +394,10 @@ Router Kely does not rewrite response bodies. Therefore an upstream response may
 - Encode as unpadded base64url and prefix with `sk-rk_`.
 - Display plaintext exactly once at creation.
 - Hash the complete ASCII token using SHA-256.
-- Store only the 32-byte hash, a non-secret display prefix, last four characters, and metadata.
+- Store only the lowercase 64-character SHA-256 hex hash, a non-secret display prefix, last four characters, and metadata in the selected identity provider.
 - Never log, persist, return again, or place plaintext keys in URLs.
+
+The default identity file never contains plaintext credentials. The bootstrap administrator key is the sole exception to file-based credential storage: its plaintext is supplied through `ROUTERKELY_ADMIN_API_KEY`, hashed once during startup, and never written by Router Kely. A mounted secret-file environment indirection SHOULD be used where the orchestrator supports it.
 
 Argon2/bcrypt/PBKDF2 are intentionally not used: these are machine-generated 256-bit secrets, not human passwords. SHA-256 supports the required constant-work, O(1) in-memory lookup without weakening a high-entropy key.
 
@@ -456,13 +463,13 @@ The login form MUST warn users that the key is submitted only to create the sess
 
 ### 10.3 Bootstrap
 
-The first administrator is created by a one-shot command in the same executable:
+The default environment-administrator secret is generated by a one-shot command in the same executable:
 
 ```text
-router-kely admin bootstrap --name <name> --email <email>
+router-kely admin bootstrap
 ```
 
-It connects to PostgreSQL, creates or promotes the user, creates one key, and prints the plaintext key once to stdout. It refuses to print secrets when stdout is not an interactive terminal unless `--output-key-file <explicit-path>` is supplied. The command is idempotent by normalized email but a new key is created only with `--create-key`.
+For the default provider, this command validates the configured identity path, creates an empty versioned identity document only when the file does not exist, and prints a generated value suitable for `ROUTERKELY_ADMIN_API_KEY` exactly once. Administrator ID, name, and email remain ordinary non-secret runtime configuration; the reserved environment administrator is never written to the identity file. The command refuses to overwrite an existing identity file and refuses to print a secret when stdout is not an interactive terminal unless `--output-key-file <explicit-path>` is supplied. Optional identity providers implement equivalent bootstrap semantics on their own cold path.
 
 ### 10.4 Internal UI API
 
@@ -489,7 +496,7 @@ if per-user or process concurrency slot unavailable: reject 429
 admit request
 ```
 
-At completion, observed cost is calculated with the route's immutable pricing snapshot and added with an atomic integer operation before the request scope is released. The accounting flusher is notified but never awaited.
+At completion, observed cost is calculated with the route's immutable pricing snapshot and added with an atomic integer operation before the request scope is released. No persistence or statistics-provider work is awaited.
 
 ### 11.2 Concurrency and overshoot
 
@@ -503,15 +510,15 @@ Exact hard monetary enforcement is explicitly rejected for MVP because it would 
 
 ### 11.3 Multiple replicas
 
-The certified MVP uses one replica. With multiple replicas, each replica admits against its latest PostgreSQL-derived baseline plus local unflushed increments. State refresh occurs once per second, so additional overshoot can equal in-flight cost plus usage admitted on other replicas during propagation/flush intervals. The UI labels quota as soft when replica count is greater than one.
+The certified default deployment uses one replica. With the default in-memory statistics provider, replicas have independent counters and therefore independent effective quotas. Running more than one replica multiplies the permitted daily spend and is unsupported unless a shared statistics provider explicitly implements cross-replica quota state. The UI labels quota as process-local when the default provider is active.
 
 Hard cross-replica quotas are a post-MVP feature and MUST NOT be approximated with a database call per request.
 
 ### 11.4 Day rollover
 
-Every admission compares a cached UTC day key. The first request after rollover atomically switches the user's current-day counter to the new day under a rare slow-path lock or compare/exchange initialization. The previous day's bucket remains available to the flusher and to reporting. A periodic background tick performs the same rollover even with no requests.
+Every admission compares a cached UTC day key. The first request after rollover atomically switches the user's current-day counter to the new day under a rare slow-path lock or compare/exchange initialization. The previous day's bucket remains available for reporting until retention expires. A periodic background tick performs the same rollover even with no requests.
 
-## 12. Accounting and durability
+## 12. Accounting and retention
 
 ### 12.1 Cost arithmetic
 
@@ -545,139 +552,66 @@ Completion atomically increments request count, input/output/cached tokens, cost
 
 `outcome_class` is one of `success`, `client_error`, `upstream_error`, or `cancelled`; raw status may be aggregated into a fixed status-class counter. Do not create a label/key from arbitrary paths, status text, client IDs, or request data.
 
-### 12.3 Flush protocol
+### 12.3 Default in-memory statistics provider
 
-Default flush interval is 1 second; also flush when 1,000 completions have accumulated. One background flusher:
+The default provider retains hourly aggregates for 72 hours and daily aggregates for 7 UTC days. Both values are configurable within hard bounds of 1–168 hours and 1–31 days. Retention cleanup happens only on hour/day rollover; there is no per-request timer, queue item, batch object, or I/O.
 
-1. Atomically exchanges active deltas into an immutable pending batch.
-2. Assigns `(instance_id, batch_sequence)`.
-3. Begins a PostgreSQL transaction.
-4. Inserts the batch identity into `usage_flushes`.
-5. If the identity already exists, treats the batch as committed and discards it.
-6. Otherwise upserts hourly and daily aggregates, updates approximate key `last_used_at`, then commits.
-7. On definite rollback/failure, retains the same batch and retries with exponential delay capped at 5 seconds.
-8. On uncertain commit outcome, retries the same identity; the unique marker makes the operation idempotent.
+Counter capacity is planned from the validated identity/model configuration, but hourly detail cells are allocated lazily on first use and then updated without per-completion allocation. Startup computes a conservative worst-case retained-size bound from the actual configured users/keys, models, outcomes, and retention. If that exceeds `MaxBytes`, startup fails explicitly; a control-plane change that would exceed it is rejected. Old buckets are recycled or released on the cold rollover path.
 
-Only one batch is in uncertain/retry state at a time. New increments continue in active counters. When pending unpersisted usage exceeds either 100,000 requests or 64 MiB estimated state, readiness becomes false and new inference requests return 503 `accounting_unavailable`; existing streams finish. This prevents unbounded memory growth and unaccounted service during a long DB outage.
+Reads for the UI and compatibility endpoints snapshot the relevant counters without stopping inference. Values may be slightly inconsistent across buckets during a concurrent update; this is acceptable for operational statistics. The atomic per-user current-day cost used for quota admission remains authoritative inside the process.
 
-### 12.4 Crash window
+### 12.4 Restart and crash semantics
 
-An abrupt process/container/host loss may lose completed usage not yet exchanged into a committed flush, normally at most one second plus requests finishing during shutdown. The service performs a best-effort flush for up to 5 seconds on graceful shutdown.
+The default provider performs no disk writes. Graceful shutdown and abrupt loss therefore have the same simple rule: all statistics and consumed-quota counters disappear, and startup begins the current UTC day's usage at zero.
 
-No local WAL is used in MVP because synchronous disk I/O violates the hot-path objective and a local ephemeral WAL complicates container recovery. This bounded accounting loss is accepted and MUST be documented operationally.
+This means the default quota is a process-local daily guardrail, not a durable billing ledger: restarting Router Kely can grant a user the remainder of the configured daily quota again. This tradeoff is accepted for the default lightweight deployment and MUST be visible in the UI and operations documentation. Deployments that require restart-safe quota enforcement or historical reporting MUST use a persistent statistics adapter such as the future PostgreSQL provider.
 
-### 12.5 Recovery
+No local WAL, periodic snapshot, or shutdown flush exists in the default provider. Adding one to the core is forbidden without benchmark evidence and a specification change.
 
-On startup:
+### 12.5 Optional persistent statistics provider contract
 
-- Load current UTC-day per-user totals from `usage_daily`.
-- Load users/keys and initialize atomic counters to those totals.
-- Generate a new random `instance_id`; batch sequence starts at 1.
-- Delete `usage_flushes` markers older than 7 days in a background maintenance job.
-- Never infer usage from logs or replay upstream requests.
+A persistent adapter MAY consume immutable aggregate batches on a background cold path and restore current-day per-user totals at startup. It MUST preserve these invariants:
 
-The UI reads PostgreSQL aggregates plus the process's local unflushed deltas so the current instance's display is near-real-time. Responses MAY be up to the flush/poll interval stale across replicas.
+- inference completion only updates in-memory atomics and never awaits the adapter;
+- retries are idempotent and memory backlog is strictly bounded;
+- provider unavailability cannot introduce provider calls on inference requests;
+- readiness fails before unpersisted state can grow without bound;
+- restored usage is installed before readiness becomes true;
+- disabling/removing the adapter yields exactly the default in-memory behavior.
 
-## 13. PostgreSQL data model
+The detailed PostgreSQL flush protocol and schema belong to that adapter's specification when it is implemented, not to the core MVP.
 
-Use PostgreSQL 16 or newer. Identifiers are `bigint GENERATED ALWAYS AS IDENTITY`. Times are `timestamptz` in UTC. SQL migrations are versioned files embedded in the executable and run by an explicit `router-kely db migrate` command.
+## 13. State-provider boundaries
 
-### 13.1 Required schema
+The core defines two small cold-path contracts. They are ordinary interfaces wired explicitly by the composition root, not a general plugin framework.
 
-```sql
-CREATE TABLE schema_migrations (
-    version         bigint PRIMARY KEY,
-    applied_at      timestamptz NOT NULL DEFAULT now(),
-    checksum        text NOT NULL
-);
+### 13.1 Identity provider
 
-CREATE TABLE control_state (
-    singleton       boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    version         bigint NOT NULL
-);
+The identity provider loads a complete versioned identity document and applies serialized control-plane mutations. Its data contains stable user/key IDs, display metadata, roles, enabled state, daily quotas, SHA-256 key hashes, and non-secret key display fragments. It never exposes plaintext keys.
 
-CREATE TABLE users (
-    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name            text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
-    email           text NOT NULL CHECK (char_length(email) BETWEEN 3 AND 320),
-    normalized_email text NOT NULL UNIQUE,
-    role            smallint NOT NULL CHECK (role IN (0, 1)), -- 0 user, 1 admin
-    enabled         boolean NOT NULL DEFAULT true,
-    quota_nano_usd  bigint NULL CHECK (quota_nano_usd IS NULL OR quota_nano_usd >= 0),
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now()
-);
+The default file provider uses a single UTF-8 JSON file. It MUST:
 
-CREATE TABLE api_keys (
-    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id         bigint NOT NULL REFERENCES users(id),
-    name            text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
-    key_hash        bytea NOT NULL UNIQUE CHECK (octet_length(key_hash) = 32),
-    display_prefix  text NOT NULL,
-    last_four       text NOT NULL CHECK (char_length(last_four) = 4),
-    enabled         boolean NOT NULL DEFAULT true,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    revoked_at      timestamptz NULL,
-    last_used_at    timestamptz NULL
-);
-CREATE INDEX api_keys_user_id_idx ON api_keys(user_id);
+- reject unknown schema versions, duplicate IDs/emails/key hashes, invalid hashes, and references to absent users;
+- require at least one enabled administrator identity, with the environment administrator satisfying this rule;
+- cap users and keys with configured hard limits before allocating the runtime snapshot;
+- write mutations as a complete validated replacement using a same-directory temporary file, restrictive permissions, flush, and atomic rename;
+- serialize concurrent mutations and reject stale version writes;
+- preserve the last valid file and runtime snapshot on any write or reload failure;
+- never copy `ROUTERKELY_ADMIN_API_KEY` into the file.
 
-CREATE TABLE usage_hourly (
-    period_hour         timestamptz NOT NULL,
-    user_id             bigint NOT NULL REFERENCES users(id),
-    key_id              bigint NOT NULL REFERENCES api_keys(id),
-    model_alias         text NOT NULL,
-    outcome_class       smallint NOT NULL,
-    request_count       bigint NOT NULL,
-    input_tokens        bigint NOT NULL,
-    cached_input_tokens bigint NOT NULL,
-    output_tokens       bigint NOT NULL,
-    cost_nano_usd       bigint NOT NULL,
-    duration_ms_sum     bigint NOT NULL,
-    usage_missing_count bigint NOT NULL,
-    PRIMARY KEY (period_hour, user_id, key_id, model_alias, outcome_class)
-);
+The environment administrator has a reserved stable user/key ID configured alongside its name/email. Its secret comes only from `ROUTERKELY_ADMIN_API_KEY`. The environment key cannot be renamed, revoked, or revealed through the UI; rotation requires changing the secret and restarting. Additional administrators may be ordinary file-backed users.
 
-CREATE TABLE usage_daily (
-    period_day          date NOT NULL,
-    user_id             bigint NOT NULL REFERENCES users(id),
-    request_count       bigint NOT NULL,
-    input_tokens        bigint NOT NULL,
-    cached_input_tokens bigint NOT NULL,
-    output_tokens       bigint NOT NULL,
-    cost_nano_usd       bigint NOT NULL,
-    usage_missing_count bigint NOT NULL,
-    PRIMARY KEY (period_day, user_id)
-);
+### 13.2 Statistics provider
 
-CREATE TABLE usage_flushes (
-    instance_id     uuid NOT NULL,
-    batch_sequence  bigint NOT NULL,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (instance_id, batch_sequence)
-);
+The statistics provider receives already-bounded aggregate state outside the inference path and supplies optional startup recovery/reporting. The default provider is the in-memory implementation in section 12. A provider may implement identity only, statistics only, or both; selection is explicit so mixed deployments are possible.
 
-CREATE TABLE audit_log (
-    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    occurred_at     timestamptz NOT NULL DEFAULT now(),
-    actor_user_id   bigint NULL REFERENCES users(id),
-    action          text NOT NULL,
-    target_type     text NOT NULL,
-    target_id       bigint NULL,
-    details         jsonb NOT NULL DEFAULT '{}'::jsonb
-);
-CREATE INDEX audit_log_occurred_at_idx ON audit_log(occurred_at DESC);
-```
+Provider contracts MUST use core-owned primitive/value types and immutable batches. Core MUST NOT reference provider-specific connection, SQL, migration, retry, or serialization types. Provider callbacks never execute inline on an inference request.
 
-`control_state.version` is incremented in the same transaction as every user/key change. Deleting users or keys is not exposed; disable/revoke preserves accounting foreign keys. `audit_log.details` contains changed field names and non-secret before/after values only—never keys, request bodies, prompts, responses, cookies, or authorization headers.
+### 13.3 Future PostgreSQL adapter
 
-### 13.2 Retention
+PostgreSQL is a post-MVP optional adapter, shipped separately from the default binary. It may take over identity data, statistics, or both. Its implementation must use explicit SQL, versioned non-destructive migrations, idempotent aggregate writes, bounded retry state, and startup recovery of current-day usage. It must pass the same data-plane performance and zero-provider-I/O invariants as the default implementation before release.
 
-- `usage_daily`: retain 400 days by default; longer reporting periods are derived by aggregating daily rows.
-- `usage_hourly`: retain 400 days by default, purged in small background batches.
-- `audit_log`: retain 400 days by default.
-- `usage_flushes`: 7 days.
-- No inference content is stored.
+No PostgreSQL schema, Npgsql dependency, connection setting, migration command, or background flusher belongs in the core until this adapter is implemented and measured.
 
 ## 14. LiteLLM compatibility profile
 
@@ -791,7 +725,7 @@ The currently authenticating key may revoke itself; the response completes and i
 
 ### 14.6 `GET /spend/logs`
 
-This is an aggregate compatibility view, not a per-request log. Parameters: `start_date`, `end_date` (UTC dates, maximum 366-day span), optional `user_id` for admin. Response rows are hourly and contain no prompt/request content:
+This is an aggregate compatibility view, not a per-request log. Parameters: `start_date`, `end_date` (UTC dates, maximum the selected provider's retained history), optional `user_id` for admin. With the default provider, dates older than the retained hourly window return no rows. Response rows are hourly and contain no prompt/request content:
 
 ```json
 [
@@ -812,7 +746,7 @@ If actual clients require a different field name/shape, add an adapter only afte
 
 ## 15. Configuration
 
-Configuration is read once at startup from `appsettings.json` plus environment variables. Secrets MUST come from environment variables or mounted secret files, not the image. Model changes require restart in MVP.
+Runtime configuration is read once at startup from `appsettings.json` plus environment variables. Secrets MUST come from environment variables or mounted secret files, not the image. Model changes require restart in MVP. The separate identity file may be atomically replaced and reloaded without restarting.
 
 Example:
 
@@ -820,10 +754,17 @@ Example:
 {
   "RouterKely": {
     "PublicBaseUrl": "https://llm.example.com",
-    "Database": {
-      "ConnectionStringEnv": "ROUTERKELY_POSTGRES_CONNECTION",
-      "MaxPoolSize": 4,
-      "CommandTimeoutSeconds": 10
+    "Identity": {
+      "Provider": "file",
+      "FilePath": "/config/identities.json",
+      "Watch": true,
+      "MaxUsers": 256,
+      "MaxKeys": 1024,
+      "EnvironmentAdminUserId": 1,
+      "EnvironmentAdminKeyId": 1,
+      "EnvironmentAdminName": "Router Kely Admin",
+      "EnvironmentAdminEmail": "admin@example.com",
+      "EnvironmentAdminKeyEnv": "ROUTERKELY_ADMIN_API_KEY"
     },
     "Upstream": {
       "BaseUrl": "https://api.deepseek.com/v1",
@@ -855,13 +796,13 @@ Example:
       "MaxRequestBodyBytes": 33554432,
       "MaxModelPrefixBytes": 65536,
       "MaxConcurrentRequests": 256,
-      "MaxConcurrentRequestsPerUser": 32,
-      "MaxUnflushedRequests": 100000,
-      "MaxUnflushedBytes": 67108864
+      "MaxConcurrentRequestsPerUser": 32
     },
-    "Accounting": {
-      "FlushIntervalMilliseconds": 1000,
-      "FlushAfterCompletions": 1000
+    "Statistics": {
+      "Provider": "memory",
+      "HourlyRetentionHours": 72,
+      "DailyRetentionDays": 7,
+      "MaxBytes": 16777216
     },
     "Compatibility": {
       "EnableUnversionedInferenceAliases": true,
@@ -875,21 +816,53 @@ Zero prices are permitted only in development. Production startup fails if any e
 
 Environment overrides use double underscores, for example `RouterKely__Upstream__BaseUrl`. Log the effective non-secret configuration at startup with secrets redacted.
 
+The default identity file has this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "version": 12,
+  "users": [
+    {
+      "id": 7,
+      "name": "Developer",
+      "email": "developer@example.com",
+      "role": "user",
+      "enabled": true,
+      "quotaNanoUsd": 100000000000
+    }
+  ],
+  "keys": [
+    {
+      "id": 42,
+      "userId": 7,
+      "name": "VS Code",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "displayPrefix": "sk-rk_abcd",
+      "lastFour": "a1b2",
+      "enabled": true
+    }
+  ]
+}
+```
+
+The environment administrator is merged into this document in memory after validation. Its reserved IDs MUST NOT appear in the file. `quotaNanoUsd` omitted or `null` means unlimited. Timestamps are intentionally absent from the default identity schema unless a demonstrated UI requirement justifies them.
+
 ## 16. Security requirements
 
 - TLS is mandatory outside local development. Router Kely may terminate TLS or run behind a trusted TLS reverse proxy.
 - Configure trusted proxy networks explicitly; otherwise ignore forwarded client identity headers.
 - Never log authorization headers, cookies, request/response bodies, query strings containing secrets, upstream credentials, or generated plaintext keys.
 - Structured logs use numeric user/key IDs, public alias, status class, duration bucket, and request ID only.
-- Use parameterized SQL exclusively. Database role has access only to Router Kely's schema and no superuser/createdb rights.
-- Container runs as a non-root UID, read-only root filesystem, no privilege escalation, all Linux capabilities dropped, and a writable temporary directory only if required.
+- Optional database adapters use parameterized SQL exclusively and a least-privilege database role.
+- Container runs as a non-root UID, read-only root filesystem, no privilege escalation, and all Linux capabilities dropped. The default provider receives write access only to the directory containing its mounted identity file so atomic replacement is possible.
 - Upstream host is fixed by configuration. Client input cannot select scheme, host, port, or path.
 - Reject request `Content-Encoding` other than absent/identity; decompression bombs are therefore impossible on the request path.
 - Enforce request/header/concurrency limits before expensive work.
 - UI renders all user-supplied names/emails with HTML escaping and sets a restrictive CSP; no inline third-party scripts, fonts, or analytics.
 - UI cookies are `Secure`, `HttpOnly`, and `SameSite=Strict`. State changes require CSRF defense.
-- Key creation, revocation, user/role/quota/status changes, and bootstrap actions write audit records.
-- At least one enabled admin must remain. Demoting/disabling the last enabled admin is rejected transactionally.
+- Key creation, revocation, user/role/quota/status changes, and bootstrap actions emit structured security audit events. The default provider relies on the external log sink for retention; it does not maintain a second audit store.
+- At least one enabled admin must remain. Demoting/disabling the last enabled admin is rejected atomically.
 - Use constant-size generic authentication errors; do not reveal whether a user or key exists.
 - Dependency and container vulnerability scanning is required in CI. Secrets scanning is required on the repository.
 - Rotate the upstream key by updating the mounted secret and restarting. Router Kely keys are individually revocable.
@@ -901,9 +874,9 @@ Environment overrides use double underscores, for example `RouterKely__Upstream_
 | Endpoint | Meaning |
 |---|---|
 | `GET /health/live` | Process event loop is alive. No dependency calls. |
-| `GET /health/ready` | Valid snapshot loaded; accounting backlog under limits; DB state not critically stale. |
+| `GET /health/ready` | Valid identity snapshot loaded; bounded statistics state healthy; selected optional providers healthy enough for their declared guarantees. |
 
-Readiness response is tiny JSON with `status`, `snapshot_version`, `database`, `accounting_backlog`, and `usage_observation`. It never includes secrets. A transient upstream outage does not make the process unready; it is visible in metrics.
+Readiness response is tiny JSON with `status`, `snapshot_version`, `identity_provider`, `statistics_provider`, and `usage_observation`. Optional providers may add one bounded status field. It never includes secrets. A transient upstream outage does not make the process unready; it is visible in metrics.
 
 ### 17.2 Metrics
 
@@ -923,9 +896,8 @@ router_kely_usage_cost_nano_usd_total{model}
 router_kely_usage_missing_total{endpoint,model}
 router_kely_quota_rejections_total
 router_kely_auth_failures_total{reason}
-router_kely_accounting_backlog_requests
-router_kely_accounting_flush_total{outcome}
-router_kely_accounting_last_success_timestamp_seconds
+router_kely_statistics_buckets{period}
+router_kely_statistics_retention_evictions_total{period}
 router_kely_snapshot_version
 router_kely_snapshot_reload_total{outcome}
 router_kely_process_working_set_bytes
@@ -933,7 +905,7 @@ router_kely_gc_allocated_bytes_total
 router_kely_gc_collections_total{generation}
 ```
 
-Never label metrics by user ID, key ID, email, request ID, raw path, IP address, or error message. Per-user usage belongs in PostgreSQL/UI, not Prometheus labels.
+Never label metrics by user ID, key ID, email, request ID, raw path, IP address, or error message. Per-user usage belongs in the selected statistics provider/UI, not Prometheus labels.
 
 ### 17.3 Logs
 
@@ -950,21 +922,20 @@ On SIGTERM:
 1. Mark unready immediately.
 2. Stop accepting new inference requests.
 3. Allow active streams to drain for the orchestrator's grace period.
-4. Attempt a final accounting flush for up to 5 seconds.
-5. Dispose the upstream handler and exit.
+4. Dispose the upstream handler and exit. The default statistics provider does not flush.
 
 ## 18. Performance budget and benchmark contract
 
 ### 18.1 Required budget
 
-Measured on Linux, release Native AOT, one pinned vCPU, container memory limit 250 MiB, logging at production defaults, PostgreSQL on a separate local-network host, and a same-host deterministic mock upstream:
+Measured on Linux, release Native AOT, one pinned vCPU, container memory limit 250 MiB, logging at production defaults, default file/memory providers, and a same-host deterministic mock upstream:
 
 | Metric | Requirement |
 |---|---:|
 | Incremental proxy latency, 1-KiB non-stream response, p50 | `< 0.25 ms` |
 | Incremental proxy latency, 1-KiB non-stream response, p99 | `< 1.0 ms` |
 | Per-SSE-chunk incremental forwarding delay, p99 | `< 1.0 ms` |
-| Database operations per inference request | `0` |
+| State-provider operations per inference request | `0` |
 | Full request/response buffering | `0` |
 | Steady idle RSS after warm-up | `< 100 MiB` |
 | RSS at 64 concurrent streams | `< 180 MiB` |
@@ -992,7 +963,7 @@ Run at concurrency 1, 16, 64, and 256:
 5. 1-MiB streamed response.
 6. Slow client consuming 1 KiB/s to verify bounded backpressure.
 7. Invalid key and over-quota rejection.
-8. Accounting flush under PostgreSQL normal latency, 100-ms latency, and outage.
+8. Statistics rollover, retention eviction, and concurrent UI reads.
 9. Snapshot reload while traffic is active.
 10. Cancellation before upstream headers and mid-SSE stream.
 
@@ -1006,7 +977,7 @@ CI compares the candidate with the default branch on the same runner. Fail when:
 - throughput regresses by >5% without an approved explanation;
 - allocation/request grows by >256 B or per-chunk allocation becomes nonzero;
 - RSS grows by >10 MiB or exceeds the hard budget;
-- any inference-path database call appears;
+- any inference-path state-provider call or file/database I/O appears;
 - Native AOT/trim warnings appear.
 
 Benchmark noise must be controlled with warm-up, CPU affinity where available, repeated samples, and median-of-runs reporting. Store machine/runtime metadata with results.
@@ -1028,18 +999,18 @@ Property tests MUST assert that, for every valid generated request within limits
 
 ### 19.2 Integration tests
 
-Run the published AOT binary with real PostgreSQL and the mock upstream. Verify:
+Run the published AOT binary with the default file/memory providers and the mock upstream. Verify:
 
 - All endpoint/status/schema contracts in this document.
 - Byte-for-byte preservation of response bodies and SSE framing.
 - Unknown request fields survive unchanged.
 - Client disconnect cancels upstream.
-- DB outage causes no data-plane DB attempt and eventually trips backlog protection.
-- Batch retry is idempotent after an injected uncertain commit.
-- Restart recovers committed daily usage and key state.
-- Control changes are immediately visible locally and within 2 seconds to a second process.
-- Graceful shutdown flushes and abrupt kill loses no more than the documented window.
-- No plaintext key appears in database, logs, metrics, crash output, or HTML after the one-time response.
+- Identity-file replacement reloads atomically; malformed or stale files preserve the last valid snapshot.
+- UI mutations atomically replace the identity file and survive restart.
+- Restart preserves file-backed identity but resets all default statistics and consumed-quota counters.
+- Retention remains within configured hour/day and cardinality bounds during rollover and concurrent reads.
+- No plaintext key appears in the identity file, logs, metrics, crash output, or HTML after the one-time response.
+- No inference-path state-provider method or file I/O is observed.
 
 ### 19.3 Real-upstream contract tests
 
@@ -1108,13 +1079,13 @@ The MVP is releasable only when all items pass.
 - [ ] User can view own usage/quota and create/rename/revoke only own keys.
 - [ ] No key/team/model quota exists; user quota is the only budget value.
 - [ ] Plaintext keys are shown once and cannot be recovered.
-- [ ] Current-day usage survives restart within the documented one-second crash window.
+- [ ] Default current-day usage and quota consumption reset on restart, and the UI labels this behavior clearly.
 - [ ] LiteLLM profile endpoints return documented schemas and pass captured coding-client fixtures.
 - [ ] `/ui` primary workflows function without JavaScript.
 
 ### 21.2 Data-plane invariants
 
-- [ ] Zero PostgreSQL calls per inference request, proven by instrumentation/test.
+- [ ] Zero state-provider calls and zero file/database I/O per inference request, proven by instrumentation/test.
 - [ ] No whole-body buffering and no OpenAI DTO/DOM deserialization.
 - [ ] Only top-level `model` bytes change in a proxied request.
 - [ ] Response and SSE bytes are forwarded unchanged.
@@ -1125,17 +1096,17 @@ The MVP is releasable only when all items pass.
 
 ### 21.3 Security and reliability
 
-- [ ] Key hashes, role checks, CSRF, session expiry, ownership, last-admin protection, and audit tests pass.
-- [ ] No secrets/content appear in logs, metrics, database aggregates, or error responses.
-- [ ] Long DB outage trips bounded backlog protection without unbounded memory.
-- [ ] Idempotent batch retry passes uncertain-commit fault injection.
+- [ ] Key hashes, role checks, CSRF, session expiry, ownership, last-admin protection, and security-audit event tests pass.
+- [ ] No secrets/content appear in logs, metrics, statistics aggregates, identity files, or error responses.
+- [ ] Identity-file corruption/reload failure preserves the last valid snapshot and reports degraded readiness.
+- [ ] Statistics retention and configured identity cardinality remain strictly bounded.
 - [ ] AOT publish has zero trim/AOT warnings; container and dependency scans have no unwaived critical finding.
-- [ ] Graceful shutdown and startup recovery tests pass.
+- [ ] Graceful shutdown and documented restart-reset behavior tests pass.
 
 ### 21.4 Performance
 
 - [ ] Every hard metric in section 18.1 passes on the reference environment.
-- [ ] A 30-minute soak at 64 concurrent SSE streams shows stable RSS, handle/socket counts, and accounting lag.
+- [ ] A 30-minute soak at 64 concurrent SSE streams shows stable RSS, handle/socket counts, and bounded statistics state.
 - [ ] A burst to 256 streams remains under 250 MiB with no OOM, deadlock, or unbounded queue.
 - [ ] Benchmark results and comparison with the default branch are attached to the release.
 
@@ -1156,11 +1127,11 @@ The MVP is releasable only when all items pass.
 - Usage observer and integer pricing.
 - Performance tests must pass before control-plane work expands.
 
-### Phase 2 — persistence and control plane
+### Phase 2 — lightweight state and control plane
 
-- SQL migrations, users/keys/quotas, atomic snapshot reload.
-- Idempotent aggregate accounting and recovery.
-- `/ui`, browser sessions, roles, audit log.
+- File-backed users/keys/quotas, environment administrator, and atomic snapshot reload.
+- Bounded in-memory statistics, UTC rollover, retention, and explicit restart-reset UX.
+- `/ui`, browser sessions, roles, and structured security-audit events.
 - Minimal LiteLLM profile endpoints.
 
 ### Phase 3 — migration
@@ -1215,8 +1186,8 @@ Recommended layout:
 /tests/RouterKely.Performance
 /deploy/Dockerfile
 /deploy/kubernetes           optional manifests
-/db/migrations
 /docs/compatibility
+/plugins/RouterKely.Postgres optional post-MVP adapter; absent from the default build
 ```
 
 Keep project count low; separation must not create abstraction overhead. The implementation should favor explicit code over generic frameworks on the data path.
@@ -1236,13 +1207,12 @@ Required engineering rules:
 Implementation can proceed while these deployment values are supplied later:
 
 - Production public base URL.
-- PostgreSQL connection secret and TLS requirements.
 - DeepSeek base URL and API secret.
 - Reviewed input/cached-input/output prices for both upstream model mappings.
 - Whether DeepSeek Responses is enabled in the target account.
 - Trusted reverse-proxy network ranges and management-listener exposure.
 - Final user quotas and bootstrap administrator identity.
-- Retention values if defaults conflict with policy.
+- Identity file mount/path, environment administrator identity/key secret, and retention values if defaults conflict with policy.
 
 No other product ambiguity should block MVP implementation. When real traffic contradicts this document, use the evidence process in section 20 and amend the smallest possible compatibility surface.
 
