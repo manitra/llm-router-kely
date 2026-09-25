@@ -1,0 +1,23 @@
+{
+  "routerKely": {
+    "listenUrl": "http://127.0.0.1:8080",
+    "clientApiKey": "sk-rk-local-change-me",
+    "upstream": {
+      "baseUrl": "https://api.deepseek.com/v1/",
+      "apiKey": "replace-with-your-deepseek-api-key"
+    },
+    "models": [
+      {
+        "alias": "deepseek-fast",
+        "upstreamModel": "deepseek-chat"
+      },
+      {
+        "alias": "deepseek-pro",
+        "upstreamModel": "deepseek-reasoner"
+      }
+    ],
+    "maxRequestBodyBytes": 33554432,
+    "maxModelPrefixBytes": 65536
+  }
+}
+
