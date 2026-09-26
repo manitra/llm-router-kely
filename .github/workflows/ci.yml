@@ -74,10 +74,30 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build and verify the container image
+        id: container-tests
         shell: bash
         run: |
           set -o pipefail
-          ./scripts/container-tests.sh | tee scripts/.tmp-container-output.log
+          # Capture stderr as well: the script reports failures on stderr, and tee alone
+          # would only capture stdout.
+          ./scripts/container-tests.sh 2>&1 | tee scripts/.tmp-container-output.log
+
+      # The job log and the artifacts both require repository access, so the output is
+      # also published to the public job summary to make failures diagnosable.
+      - name: Publish the container test output
+        if: always()
+        shell: bash
+        env:
+          TESTS_OUTCOME: ${{ steps.container-tests.outcome }}
+        run: |
+          log=scripts/.tmp-container-output.log
+          [[ -f "$log" ]] || exit 0
+          {
+            echo "## Container test output (${TESTS_OUTCOME})"
+            echo '```text'
+            tail -c 60000 "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload container test output
         if: always()
