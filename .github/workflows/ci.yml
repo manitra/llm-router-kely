@@ -84,6 +84,21 @@ jobs:
 
       # The job log and the artifacts both require repository access, so the output is
       # also published to the public job summary to make failures diagnosable.
+      # The job log and the summary both need repository access, but check-run
+      # annotations are readable on a public repository, so the failure detail is
+      # reported there as well.
+      - name: Annotate the failure
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          log=scripts/.tmp-container-output.log
+          [[ -f "$log" ]] || exit 0
+          start="$(grep -n '^==> ' "$log" | tail -n 1 | cut -d: -f1 || true)"
+          start="${start:-1}"
+          detail="$(tail -n "+${start}" "$log" | tail -c 1200 | tr -d '\r' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+          echo "::error::container tests failed:%0A${detail}"
+
       - name: Publish the container test output
         if: always()
         shell: bash
