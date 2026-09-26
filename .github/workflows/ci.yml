@@ -72,6 +72,8 @@ jobs:
         with:
           name: performance-badges
           path: scripts/.tmp-ci-pages
+          # Temp paths are dot-prefixed (scripts/.tmp*), which upload-artifact skips by default.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -81,5 +83,6 @@ jobs:
         with:
           name: test-output-${{ github.run_attempt }}
           path: scripts/.tmp-ci-output.log
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
