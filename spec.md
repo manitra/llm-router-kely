@@ -1,26 +1,30 @@
-# Router Kely — implementation specification
+# LLM Router Kely — implementation specification
 
 **Status:** Implementation-ready MVP specification  
 **Version:** 1.0  
 **Target runtime:** .NET 10 LTS, Linux x64/arm64, Native AOT  
-**Deployment:** one self-contained `router-kely` executable/container; no database or sidecar required
+**Deployment:** one self-contained `llm-router-kely` executable/container; no database or sidecar required
 **Primary upstream:** DeepSeek OpenAI-compatible API  
 **Compatibility goal:** the smallest observed subset of OpenAI and LiteLLM required by the organization's coding clients
 
-> **Global engineering guideline:** Router Kely MUST remain an ultra-high-speed, ultra-low-latency, high-throughput router with a nano memory footprint. Every feature, dependency, abstraction, allocation, retained byte, background task, and persistence choice is subordinate to measured data-plane performance and the smallest practical runtime footprint.
+**Tagline:** OpenAI-compatible LLM routing with sub-millisecond latency and a tiny memory footprint.
+
+> **Global engineering guideline:** LLM Router Kely MUST remain an ultra-high-speed, ultra-low-latency, high-throughput router with a nano memory footprint. Every feature, dependency, abstraction, allocation, retained byte, background task, and persistence choice is subordinate to measured data-plane performance and the smallest practical runtime footprint.
 
 ## 1. Product definition
 
-**Router Kely** is a minimalist authenticated reverse proxy for LLM traffic. It is intended to replace the part of LiteLLM actually used by a small development organization without recreating LiteLLM's routing, provider, policy, or organizational model. The technical slug is `router-kely`.
+**LLM Router Kely** is a minimalist authenticated reverse proxy for LLM traffic. It is intended to replace the part of LiteLLM actually used by a small development organization without recreating LiteLLM's routing, provider, policy, or organizational model. The technical slug is `llm-router-kely`.
+
+`LLM` makes the project's purpose easy to discover, while `Kely`—Malagasy for “small”—expresses its tiny, locally rooted design.
 
 The data plane behaves like an HTTP streaming proxy with authentication, a two-entry model map, user-level quota admission, and asynchronous accounting attached:
 
 ```text
 coding client
     │
-    │ OpenAI-compatible HTTP + Router Kely key
+    │ OpenAI-compatible HTTP + LLM Router Kely key
     ▼
-Router Kely
+LLM Router Kely
     ├─ authenticate key from an in-memory hash table
     ├─ check the owning user's in-memory current-day usage
     ├─ replace one top-level JSON property: model
@@ -35,7 +39,7 @@ The control plane is a small server-rendered UI under `/ui`. The default identit
 
 The MVP is successful when:
 
-- Existing coding clients can switch from LiteLLM by changing only the base URL, while retaining their Router Kely-issued API key and one of the two advertised aliases.
+- Existing coding clients can switch from LiteLLM by changing only the base URL, while retaining their LLM Router Kely-issued API key and one of the two advertised aliases.
 - The measured incremental proxy overhead is below 1 ms at p99 under the benchmark conditions in section 18.
 - The service stays below 250 MiB RSS with a 1-vCPU limit under the required workload.
 - No inference request performs external state I/O, waits for accounting, buffers a complete body, or constructs an OpenAI request/response object graph.
@@ -67,7 +71,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Provider boundary | Narrow startup/control-plane ports selected at build/startup; no dynamic assembly loading, reflection discovery, or provider call on an inference request. |
 | Quota strictness | Soft admission limit based on confirmed local usage; explicitly bounded concurrent overshoot and explicit default-provider restart-reset semantics. |
 | UI | Server-rendered HTML at `/ui`, styled with the vendored Pico CSS 2.1.1 classless build; no SPA framework, Node.js, or frontend build pipeline. |
-| UI authentication | Existing Router Kely API key exchanged for a short-lived in-memory browser session. No passwords in Router Kely. |
+| UI authentication | Existing LLM Router Kely API key exchanged for a short-lived in-memory browser session. No passwords in LLM Router Kely. |
 | ORM | None. A future PostgreSQL adapter uses Npgsql and explicit SQL. |
 | Cache/broker | None. No Redis, message broker, or worker service. |
 | Process model | One process per container. The certified MVP deployment is one replica. |
@@ -114,10 +118,10 @@ Any proposed feature outside section 3.1 requires a measured client trace provin
 
 ```text
                          ┌───────────────────────────────────────┐
-                         │ Router Kely, one Native AOT process   │
+                         │ LLM Router Kely, Native AOT process    │
                          │                                       │
 Client ─────────────────►│ /v1/*  minimal data plane             │──────► DeepSeek
-Bearer Router Kely key    │  immutable snapshot + atomic counters│        persistent pool
+Bearer LLM Router Kely key │  immutable snapshot + atomic counters│        persistent pool
                          │                                       │
 Browser ────────────────►│ /ui    server-rendered control plane  │
 Session cookie            │ /internal/ui-api/*                   │
@@ -196,13 +200,13 @@ Every added package requires evidence of Native AOT compatibility, retained-size
 
 | Method | Path | Authentication | Behavior |
 |---|---|---|---|
-| `POST` | `/v1/chat/completions` | Router Kely bearer key | Rewrite model and proxy. |
-| `POST` | `/chat/completions` | Router Kely bearer key | Exact alias of `/v1/chat/completions`. |
-| `POST` | `/v1/responses` | Router Kely bearer key | Rewrite model and proxy. |
-| `POST` | `/responses` | Router Kely bearer key | Exact alias of `/v1/responses`. |
-| `GET` | `/v1/models` | Router Kely bearer key | Return public alias list. |
-| `GET` | `/models` | Router Kely bearer key | Exact alias of `/v1/models`. |
-| `GET` | `/v1/models/{id}` | Router Kely bearer key | Return one alias or OpenAI-style 404. |
+| `POST` | `/v1/chat/completions` | LLM Router Kely bearer key | Rewrite model and proxy. |
+| `POST` | `/chat/completions` | LLM Router Kely bearer key | Exact alias of `/v1/chat/completions`. |
+| `POST` | `/v1/responses` | LLM Router Kely bearer key | Rewrite model and proxy. |
+| `POST` | `/responses` | LLM Router Kely bearer key | Exact alias of `/v1/responses`. |
+| `GET` | `/v1/models` | LLM Router Kely bearer key | Return public alias list. |
+| `GET` | `/models` | LLM Router Kely bearer key | Exact alias of `/v1/models`. |
+| `GET` | `/v1/models/{id}` | LLM Router Kely bearer key | Return one alias or OpenAI-style 404. |
 
 No generic `/v1/{**path}` proxy is permitted. Unsupported paths return 404 and are counted by normalized path signature without logging query strings or bodies.
 
@@ -229,8 +233,8 @@ Rules:
 {
   "object": "list",
   "data": [
-    {"id":"deepseek-fast","object":"model","created":0,"owned_by":"router-kely"},
-    {"id":"deepseek-pro","object":"model","created":0,"owned_by":"router-kely"}
+    {"id":"deepseek-fast","object":"model","created":0,"owned_by":"llm-router-kely"},
+    {"id":"deepseek-pro","object":"model","created":0,"owned_by":"llm-router-kely"}
   ]
 }
 ```
@@ -275,7 +279,7 @@ Forward end-to-end headers needed by OpenAI-compatible clients, including `Conte
 - `Accept-Encoding`; send `Accept-Encoding: identity` upstream so usage observation sees plain bytes.
 - Client-supplied `X-Forwarded-*` headers unless the deployment's trusted proxy policy explicitly accepts them.
 
-Add the configured upstream authorization header, a generated `X-Request-ID` if none is supplied, and `User-Agent: router-kely/<version>`. Request IDs are fixed-size random/monotonic values and MUST NOT contain user data.
+Add the configured upstream authorization header, a generated `X-Request-ID` if none is supplied, and `User-Agent: llm-router-kely/<version>`. Request IDs are fixed-size random/monotonic values and MUST NOT contain user data.
 
 ### 6.6 Limits and timeouts
 
@@ -333,7 +337,7 @@ Escaped property names equivalent to `model` MAY be rejected as `invalid_request
 - `/v1/responses` and `/responses` forward to `{DeepSeekBaseUrl}/responses`.
 - Redirects are disabled. Upstream base URL and path composition MUST prevent path traversal and accidental host changes.
 
-If DeepSeek does not support `/responses` in the target environment, the endpoint remains implemented but returns a deterministic 501 `upstream_capability_disabled` unless `ResponsesEnabled=true`. Router Kely does not translate Responses into Chat Completions.
+If DeepSeek does not support `/responses` in the target environment, the endpoint remains implemented but returns a deterministic 501 `upstream_capability_disabled` unless `ResponsesEnabled=true`. LLM Router Kely does not translate Responses into Chat Completions.
 
 ## 8. Streaming and response handling
 
@@ -384,7 +388,7 @@ This is a conscious MVP limitation. If real DeepSeek streaming requires a reques
 
 ### 8.4 Upstream model in responses
 
-Router Kely does not rewrite response bodies. Therefore an upstream response may report `deepseek-chat` or `deepseek-reasoner` instead of the public alias. This is an intentional compatibility deviation required for byte-for-byte streaming. Clients that require response-model aliasing are out of MVP scope until observed.
+LLM Router Kely does not rewrite response bodies. Therefore an upstream response may report `deepseek-chat` or `deepseek-reasoner` instead of the public alias. This is an intentional compatibility deviation required for byte-for-byte streaming. Clients that require response-model aliasing are out of MVP scope until observed.
 
 ## 9. API keys and authorization
 
@@ -397,7 +401,7 @@ Router Kely does not rewrite response bodies. Therefore an upstream response may
 - Store only the lowercase 64-character SHA-256 hex hash, a non-secret display prefix, last four characters, and metadata in the selected identity provider.
 - Never log, persist, return again, or place plaintext keys in URLs.
 
-The default identity file never contains plaintext credentials. The bootstrap administrator key is the sole exception to file-based credential storage: its plaintext is supplied through `ROUTERKELY_ADMIN_API_KEY`, hashed once during startup, and never written by Router Kely. A mounted secret-file environment indirection SHOULD be used where the orchestrator supports it.
+The default identity file never contains plaintext credentials. The bootstrap administrator key is the sole exception to file-based credential storage: its plaintext is supplied through `ROUTERKELY_ADMIN_API_KEY`, hashed once during startup, and never written by LLM Router Kely. A mounted secret-file environment indirection SHOULD be used where the orchestrator supports it.
 
 Argon2/bcrypt/PBKDF2 are intentionally not used: these are machine-generated 256-bit secrets, not human passwords. SHA-256 supports the required constant-work, O(1) in-memory lookup without weakening a high-entropy key.
 
@@ -433,7 +437,7 @@ All browser UI routes live under `/ui`:
 
 | Path | Purpose |
 |---|---|
-| `/ui/login` | Paste an existing Router Kely key to begin a browser session. |
+| `/ui/login` | Paste an existing LLM Router Kely key to begin a browser session. |
 | `/ui` | Redirect to dashboard. |
 | `/ui/dashboard` | Own daily usage, quota, remaining amount, model split. |
 | `/ui/keys` | Own key list; create, rename, revoke. |
@@ -450,7 +454,7 @@ The initial administration UI is intentionally one server-rendered users table p
 
 ### 10.2 Browser session
 
-`POST /ui/login` accepts a Router Kely key over TLS, authenticates it using the normal in-memory lookup, and creates a 256-bit opaque random session ID. The session is stored only in a bounded in-memory table and sent in a cookie:
+`POST /ui/login` accepts an LLM Router Kely key over TLS, authenticates it using the normal in-memory lookup, and creates a 256-bit opaque random session ID. The session is stored only in a bounded in-memory table and sent in a cookie:
 
 ```text
 HttpOnly; Secure; SameSite=Strict; Path=/ui
@@ -475,7 +479,7 @@ The `Secure` cookie flag is mandatory under HTTPS. The loopback-only HTTP develo
 The default environment-administrator secret is generated by a one-shot command in the same executable:
 
 ```text
-router-kely admin bootstrap
+llm-router-kely admin bootstrap
 ```
 
 For the default provider, this command validates the configured identity path, creates an empty versioned identity document only when the file does not exist, and prints a generated value suitable for `ROUTERKELY_ADMIN_API_KEY` exactly once. Administrator ID, name, and email remain ordinary non-secret runtime configuration; the reserved environment administrator is never written to the identity file. The command refuses to overwrite an existing identity file and refuses to print a secret when stdout is not an interactive terminal unless `--output-key-file <explicit-path>` is supplied. Optional identity providers implement equivalent bootstrap semantics on their own cold path.
@@ -573,7 +577,7 @@ Reads for the UI and compatibility endpoints snapshot the relevant counters with
 
 The default provider performs no disk writes. Graceful shutdown and abrupt loss therefore have the same simple rule: all statistics and consumed-quota counters disappear, and startup begins the current UTC day's usage at zero.
 
-This means the default quota is a process-local daily guardrail, not a durable billing ledger: restarting Router Kely can grant a user the remainder of the configured daily quota again. This tradeoff is accepted for the default lightweight deployment and MUST be visible in the UI and operations documentation. Deployments that require restart-safe quota enforcement or historical reporting MUST use a persistent statistics adapter such as the future PostgreSQL provider.
+This means the default quota is a process-local daily guardrail, not a durable billing ledger: restarting LLM Router Kely can grant a user the remainder of the configured daily quota again. This tradeoff is accepted for the default lightweight deployment and MUST be visible in the UI and operations documentation. Deployments that require restart-safe quota enforcement or historical reporting MUST use a persistent statistics adapter such as the future PostgreSQL provider.
 
 No local WAL, periodic snapshot, or shutdown flush exists in the default provider. Adding one to the core is forbidden without benchmark evidence and a specification change.
 
@@ -624,17 +628,17 @@ No PostgreSQL schema, Npgsql dependency, connection setting, migration command, 
 
 ## 14. LiteLLM compatibility profile
 
-Compatibility is intentionally behavioral and narrow. The project publishes a versioned profile named `router-kely-litellm-v1`. Unknown response fields may be added, but defined fields are stable.
+Compatibility is intentionally behavioral and narrow. The project publishes a versioned profile named `llm-router-kely-litellm-v1`. Unknown response fields may be added, but defined fields are stable.
 
 ### 14.1 Endpoints
 
 | Method | Path | Purpose | Authorization |
 |---|---|---|---|
-| `GET` | `/key/info` | Current key, owner, usage, quota. | Any Router Kely key; own key only. |
-| `GET` | `/v1/model/info` and `/model/info` | LiteLLM-compatible metadata for configured public aliases. | Any Router Kely key. |
-| `GET` | `/user/daily/activity` | Retained daily aggregate usage with model/provider/key breakdowns. | Any Router Kely key; own usage only in MVP. |
-| `GET` | `/user/info` | Current user and aggregate usage. | Any Router Kely key; self by default. Admin may pass `user_id`. |
-| `POST` | `/key/generate` | Create a key for self, or specified user for admin. | Any Router Kely key. |
+| `GET` | `/key/info` | Current key, owner, usage, quota. | Any LLM Router Kely key; own key only. |
+| `GET` | `/v1/model/info` and `/model/info` | LiteLLM-compatible metadata for configured public aliases. | Any LLM Router Kely key. |
+| `GET` | `/user/daily/activity` | Retained daily aggregate usage with model/provider/key breakdowns. | Any LLM Router Kely key; own usage only in MVP. |
+| `GET` | `/user/info` | Current user and aggregate usage. | Any LLM Router Kely key; self by default. Admin may pass `user_id`. |
+| `POST` | `/key/generate` | Create a key for self, or specified user for admin. | Any LLM Router Kely key. |
 | `POST` | `/key/delete` | Revoke named key IDs. | Owner or admin. |
 | `GET` | `/spend/logs` | Aggregated usage only, not raw logs. | Self; admin may filter user. |
 
@@ -669,7 +673,7 @@ Query parameters are ignored unless discovered as required. Response:
 }
 ```
 
-`key` and `info.token` are always masked. LiteLLM-compatible metadata is nested under `info`. `spend` and `max_budget` are JSON numbers derived on this cold path; the integer `router_kely` fields are authoritative. `spend` is the current UTC-day usage, and `budget_reset_at` is the start of the next UTC day. Unlimited quota emits `max_budget: null` and `quota_nano_usd: null`. `quota_period` is always `day` and distinguishes Router Kely's daily window from LiteLLM's monthly `budget_reset_at` convention.
+`key` and `info.token` are always masked. LiteLLM-compatible metadata is nested under `info`. `spend` and `max_budget` are JSON numbers derived on this cold path; the integer `router_kely` fields are authoritative. `spend` is the current UTC-day usage, and `budget_reset_at` is the start of the next UTC day. Unlimited quota emits `max_budget: null` and `quota_nano_usd: null`. `quota_period` is always `day` and distinguishes LLM Router Kely's daily window from LiteLLM's monthly `budget_reset_at` convention.
 
 ### 14.3 `GET /user/info`
 
@@ -762,7 +766,7 @@ If actual clients require a different field name/shape, add an adapter only afte
 
 Both paths return the same authenticated response. The response contains a top-level `data` array with one item per configured public alias. Each item contains:
 
-- `model_name`: the public Router Kely alias;
+- `model_name`: the public LLM Router Kely alias;
 - `litellm_params.model`: the configured upstream model identifier, with no credential or internal host data;
 - `model_info.id`: a stable deterministic identifier derived from the alias;
 - configured context/output limits and per-token input/cache/output prices;
@@ -824,7 +828,7 @@ Example:
       "MaxKeys": 1024,
       "EnvironmentAdminUserId": 1,
       "EnvironmentAdminKeyId": 1,
-      "EnvironmentAdminName": "Router Kely Admin",
+      "EnvironmentAdminName": "LLM Router Kely Admin",
       "EnvironmentAdminEmail": "admin@example.com",
       "EnvironmentAdminKeyEnv": "ROUTERKELY_ADMIN_API_KEY"
     },
@@ -872,7 +876,7 @@ Example:
 }
 ```
 
-Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; Router Kely never scrapes mutable provider pricing.
+Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing.
 
 Environment overrides use double underscores, for example `RouterKely__Upstream__BaseUrl`. Log the effective non-secret configuration at startup with secrets redacted.
 
@@ -910,7 +914,7 @@ The environment administrator is merged into this document in memory after valid
 
 ## 16. Security requirements
 
-- TLS is mandatory outside local development. Router Kely may terminate TLS or run behind a trusted TLS reverse proxy.
+- TLS is mandatory outside local development. LLM Router Kely may terminate TLS or run behind a trusted TLS reverse proxy.
 - Configure trusted proxy networks explicitly; otherwise ignore forwarded client identity headers.
 - Never log authorization headers, cookies, request/response bodies, query strings containing secrets, upstream credentials, or generated plaintext keys.
 - Structured logs use numeric user/key IDs, public alias, status class, duration bucket, and request ID only.
@@ -925,7 +929,7 @@ The environment administrator is merged into this document in memory after valid
 - At least one enabled admin must remain. Demoting/disabling the last enabled admin is rejected atomically.
 - Use constant-size generic authentication errors; do not reveal whether a user or key exists.
 - Dependency and container vulnerability scanning is required in CI. Secrets scanning is required on the repository.
-- Rotate the upstream key by updating the mounted secret and restarting. Router Kely keys are individually revocable.
+- Rotate the upstream key by updating the mounted secret and restarting. LLM Router Kely keys are individually revocable.
 
 ## 17. Observability and operations
 
@@ -1109,7 +1113,7 @@ For at least seven representative working days before cutover:
 2. Record metadata only: UTC time, HTTP method, normalized path template, status, content type, response streaming flag, client user-agent family/version, request/response byte counts, and latency.
 3. Never record authorization headers, cookies, query-string values, or request/response bodies.
 4. Normalize numeric/UUID/key-looking path segments to placeholders and hash any unavoidable client identifier with a rotating salt.
-5. Group counts by method + normalized path + client family. Flag endpoints outside Router Kely's proposed list.
+5. Group counts by method + normalized path + client family. Flag endpoints outside LLM Router Kely's proposed list.
 6. Exercise every approved VS Code plugin/client workflow: start, model discovery, chat, streaming, tool calls, view usage/quota, create/revoke key if supported, cancellation, and errors.
 7. For each extra endpoint, capture its contract in a sanitized local mock: method, path, required headers, query parameter names (not values), minimal redacted request shape, status, response field names/types, and streaming behavior.
 
@@ -1131,9 +1135,9 @@ If a client probes an endpoint but works after a 404/501, record the probe and d
 
 Inference requests must never be duplicated to DeepSeek merely for shadowing because that changes cost and side effects. Instead:
 
-- Replay sanitized synthetic fixtures against Router Kely in CI.
-- Route one consenting user/client to Router Kely as a canary.
-- Compare endpoint/status/latency metadata between LiteLLM and Router Kely.
+- Replay sanitized synthetic fixtures against LLM Router Kely in CI.
+- Route one consenting user/client to LLM Router Kely as a canary.
+- Compare endpoint/status/latency metadata between LiteLLM and LLM Router Kely.
 - Increase canary users only after one week without an unexplained compatibility error.
 
 ## 21. Acceptance criteria
@@ -1208,7 +1212,7 @@ The MVP is releasable only when all items pass.
 ### Phase 3 — migration
 
 - Import or recreate users and quotas.
-- Issue Router Kely keys; existing LiteLLM plaintext keys cannot be imported unless their original plaintext is available. Prefer rotation.
+- Issue LLM Router Kely keys; existing LiteLLM plaintext keys cannot be imported unless their original plaintext is available. Prefer rotation.
 - Run synthetic compatibility suite, then one-user canary.
 - Expand canary, monitor missing usage and unknown endpoints.
 - Switch hostname/base URL and keep LiteLLM available for rollback during the agreed observation window.
@@ -1225,17 +1229,17 @@ Migrate only:
 - one daily user quota;
 - optional opening current-day usage balance with an audited migration batch.
 
-Do not migrate teams, memberships, team/key/model budgets, routing rules, fallbacks, provider objects, raw spend logs, or LiteLLM internal IDs. If several LiteLLM budgets exist, an operator must choose the single user quota explicitly; Router Kely does not infer precedence.
+Do not migrate teams, memberships, team/key/model budgets, routing rules, fallbacks, provider objects, raw spend logs, or LiteLLM internal IDs. If several LiteLLM budgets exist, an operator must choose the single user quota explicitly; LLM Router Kely does not infer precedence.
 
-A LiteLLM monthly budget is not equivalent to a Router Kely daily quota: copying a monthly amount into a daily value grants roughly 30 times more spend. The operator MUST set the daily value explicitly, and the migration report MUST show the monthly source amount and the chosen daily value.
+A LiteLLM monthly budget is not equivalent to an LLM Router Kely daily quota: copying a monthly amount into a daily value grants roughly 30 times more spend. The operator MUST set the daily value explicitly, and the migration report MUST show the monthly source amount and the chosen daily value.
 
 ### 23.2 Key migration
 
-Because secure systems store hashes and different systems may hash/format keys differently, key portability is not assumed. Default migration creates new Router Kely keys and revokes LiteLLM keys after cutover. A one-time key-hash import tool is permitted only if a security review proves the incoming hash represents the exact bearer token with compatible SHA-256 semantics; plaintext must never be exported for migration.
+Because secure systems store hashes and different systems may hash/format keys differently, key portability is not assumed. Default migration creates new LLM Router Kely keys and revokes LiteLLM keys after cutover. A one-time key-hash import tool is permitted only if a security review proves the incoming hash represents the exact bearer token with compatible SHA-256 semantics; plaintext must never be exported for migration.
 
 ### 23.3 Compatibility versioning
 
-- OpenAI-compatible paths remain stable within a major Router Kely version.
+- OpenAI-compatible paths remain stable within a major LLM Router Kely version.
 - LiteLLM compatibility behavior is named/versioned in documentation, even though paths remain conventional.
 - Additive response fields are allowed. Removing/renaming fields or changing types requires a major compatibility version and captured-client tests.
 - Unsupported fields sent to inference are forwarded; unsupported control-plane policy fields are rejected.
@@ -1243,7 +1247,7 @@ Because secure systems store hashes and different systems may hash/format keys d
 
 ### 23.4 Rollback
 
-Rollback changes routing/DNS to LiteLLM; it does not replay requests. Maintain both gateways' keys during canary or use separate client profiles. Export Router Kely aggregate usage as CSV/JSON if finance needs a combined reporting period, but do not attempt bidirectional live synchronization.
+Rollback changes routing/DNS to LiteLLM; it does not replay requests. Maintain both gateways' keys during canary or use separate client profiles. Export LLM Router Kely aggregate usage as CSV/JSON if finance needs a combined reporting period, but do not attempt bidirectional live synchronization.
 
 ## 24. Repository and implementation constraints
 
@@ -1295,4 +1299,4 @@ No other product ambiguity should block MVP implementation. When real traffic co
 - LiteLLM, AI Gateway overview: <https://docs.litellm.ai/docs/simple_proxy>
 - LiteLLM, virtual keys: <https://docs.litellm.ai/docs/proxy/virtual_keys>
 
-These references inform compatibility and runtime choices; this specification is the normative contract for Router Kely.
+These references inform compatibility and runtime choices; this specification is the normative contract for LLM Router Kely.
