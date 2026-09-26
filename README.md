@@ -60,7 +60,7 @@ Pin `:sha-<commit>` or a release tag such as `:1.2.3` for reproducible deploymen
 
 Mount a persistent volume at `/data`. It holds `router-kely.local.json` and the `router-kely.identities.json` the admin UI rewrites. On the first start the container seeds the configuration from the image default; edit it and restart the container to apply changes, or manage users in the admin UI. Secrets live in the environment, never in the volume.
 
-The entrypoint takes ownership of the volume and then drops to the unprivileged `app` user (uid 1654) before the router starts, so both named volumes and bind mounts work with no host-side preparation. Only a platform that forces a non-root user needs a volume already writable by uid 1654.
+The container runs as the unprivileged `app` user (uid 1654) for its whole lifetime and never modifies the mounted directory. A Docker volume mounted at `/data` inherits the image's ownership and needs no preparation, which is what `docker run -v router-kely-data:/data` and Coolify's persistent storage provide. For a host bind mount, chown the directory to `1654:1654` first; the container refuses to start with that exact instruction if it cannot write to it.
 
 On Coolify, either:
 

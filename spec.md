@@ -925,9 +925,9 @@ The repository-root `scripts/container/Dockerfile` builds the certified single-c
 | Ignore rules | `scripts/container/Dockerfile.dockerignore`, applied because BuildKit requires this file to sit next to the Dockerfile and be named after it |
 | Build stage | `mcr.microsoft.com/dotnet/sdk:10.0-alpine` with `clang`, `build-base`, and `zlib-dev` |
 | Publish | `dotnet publish --configuration Release --runtime linux-musl-x64` or `linux-musl-arm64`, selected from `TARGETARCH` |
-| Runtime stage | `mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine`, plus `su-exec` (65 KiB) to drop privileges |
-| Router process user | uid/gid `1654`, the non-root `app` user the base image provides |
-| Writable path | `/data` only, claimed by the entrypoint and owned by `1654` with mode `0700`; the root filesystem is expected to be read-only |
+| Runtime stage | `mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine` |
+| Process user | uid/gid `1654` for the container's whole lifetime; the image declares `USER 1654:1654` |
+| Writable path | `/data` only, owned by `1654` with mode `0700`; the root filesystem is expected to be read-only |
 | Published port | `8080` |
 | Volume | `/data`, holding the configuration file and the identity file |
 
@@ -948,12 +948,12 @@ Container behavior:
 
 - The entrypoint refuses to start when either secret is missing, because the seeded file contains placeholder values that would otherwise be accepted.
 - On first start the entrypoint copies the template to `ROUTERKELY_CONFIG` with owner-only permissions and reports that the operator should edit it. An existing file is never overwritten, so operator edits survive restarts and redeployments.
-- The image sets no `USER`. The entrypoint starts as root, takes ownership of `ROUTERKELY_CONFIG`'s directory, then re-executes itself as uid `1654` before the router starts, so the router process is always unprivileged. This is required because a bind mount keeps the host directory's ownership, which on Linux is usually root: with a plain `USER 1654` the router could not write the identity file, and the failure is invisible on Docker Desktop because it presents bind mounts as writable regardless of ownership.
-- A named volume inherits the ownership baked into the image, so it needs no preparation. A bind mount is claimed automatically by the root step above. A platform that forces a non-root user skips the claiming step and therefore MUST provide a volume writable by uid `1654`; an unwritable volume fails startup with an explicit diagnostic rather than a bare `mkdir` or `cp` error.
+- The container never starts as root and MUST NOT take ownership of a mounted directory or otherwise modify host state, so `/data` has to be writable by uid `1654` before the container starts. Running as root merely to claim a bind mount was tried and rejected: it takes the directory away from its owner, which breaks host-side access and cleanup, and that failure is invisible on Docker Desktop because it presents bind mounts as writable regardless of ownership.
+- A Docker volume mounted at `/data` inherits the ownership of the image's `/data` directory, so it needs no host-side preparation; this is what an orchestrator's managed storage provides. A host bind mount MUST be chowned to `1654:1654`. When the directory is not writable, startup fails with a diagnostic that names the remedy rather than a bare `mkdir` or `cp` error.
 - The configuration and identity files are read once at startup, so a change requires a container restart. The admin UI rewrites the identity file while the container runs, so it MUST NOT be edited concurrently: either manage users through the UI or stop the container first.
 - TLS is terminated by the platform reverse proxy. The container listener stays plain HTTP on the internal network and MUST NOT be published without TLS in front of it. The process listens on `0.0.0.0`, which the platform proxy requires.
 - On a platform that asks for a build context and a Dockerfile path separately, the context is the repository root and the Dockerfile path is `scripts/container/Dockerfile`.
-- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, resolve of the compose build settings, first-boot seeding, unprivileged router process, read-only root filesystem, working health check, operator configuration surviving a restart, refusal of an invalid configuration, a root-owned volume being claimed, a named volume needing no preparation, and the missing-secret and unwritable-volume diagnostics. Every check runs on every platform: a root-owned named volume with a marker file reproduces bind-mount ownership on a workstation, because Docker re-initializes an empty named volume from the image and would otherwise mask the behaviour.
+- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, compose build settings, the declared image user, first-boot seeding into a volume, the unprivileged router process, read-only root filesystem, working health check, environment secrets accepted while the file placeholder is rejected, operator configuration surviving a restart, refusal of an invalid configuration, and the missing-secret and unusable-volume diagnostics. Every check runs on every platform: an unusable volume is a root-owned Docker volume with a marker file, because Docker re-initializes an empty volume from the image and a Docker Desktop bind mount ignores ownership, either of which would mask the behaviour under test.
 
 ### 15.2 Published image
 
@@ -980,7 +980,7 @@ Registry changes require no credentials for pulling because the package is publi
 - Never log authorization headers, cookies, request/response bodies, query strings containing secrets, upstream credentials, or generated plaintext keys.
 - Structured logs use numeric user/key IDs, public alias, status class, duration bucket, and request ID only.
 - Optional database adapters use parameterized SQL exclusively and a least-privilege database role.
-- Container runs as a non-root UID, read-only root filesystem, no privilege escalation, and all Linux capabilities dropped. Root is used only inside the entrypoint to claim a host-mounted `/data` directory, and privileges are dropped before the router starts. The provider receives write access only to the directory containing its mounted identity file so atomic replacement is possible.
+- Container runs as a non-root UID for its whole lifetime, read-only root filesystem, no privilege escalation, and all Linux capabilities dropped. It never starts as root and never takes ownership of a mounted directory, so the volume it writes to is mounted writable by uid `1654`. The provider receives write access only to the directory containing its mounted identity file so atomic replacement is possible.
 - Upstream host is fixed by configuration. Client input cannot select scheme, host, port, or path.
 - Reject request `Content-Encoding` other than absent/identity; decompression bombs are therefore impossible on the request path.
 - Enforce request/header/concurrency limits before expensive work.

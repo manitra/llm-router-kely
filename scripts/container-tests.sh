@@ -13,16 +13,18 @@ readonly container="routerkely-container-test"
 # One-shot runs that are expected to fail at startup use a separate name so they
 # never collide with the long-running container.
 readonly probe="routerkely-container-test-probe"
-readonly named_container="routerkely-container-test-named"
-readonly named_volume="routerkely-container-test-data"
+# The configuration and identity files live in a Docker volume, which is what an
+# orchestrator such as Coolify provides by default and what lets the unprivileged
+# container write without the host having to prepare anything.
+readonly data_volume="routerkely-container-test-data"
 readonly blocked_volume="routerkely-container-test-blocked"
 readonly port="${ROUTERKELY_TEST_PORT:-18080}"
 readonly admin_key="sk-rk-container-test-admin"
-readonly config_path="$work_dir/router-kely.local.json"
+readonly config_path="/data/router-kely.local.json"
 
 cleanup() {
-  docker rm --force "$container" "$probe" "$named_container" >/dev/null 2>&1 || true
-  docker volume rm --force "$named_volume" "$blocked_volume" >/dev/null 2>&1 || true
+  docker rm --force "$container" "$probe" >/dev/null 2>&1 || true
+  docker volume rm --force "$data_volume" "$blocked_volume" >/dev/null 2>&1 || true
   docker rmi --force "$probe_image" >/dev/null 2>&1 || true
   rm -rf -- "$work_dir"
 }
@@ -50,7 +52,7 @@ container_env() {
 start_container() {
   container_env --detach --name "$container" \
     --publish "127.0.0.1:$port:8080" \
-    --volume "$work_dir:/data" \
+    --volume "$data_volume:/data" \
     --read-only \
     --security-opt no-new-privileges:true >/dev/null
 }
@@ -77,19 +79,32 @@ wait_for_ready() {
   return 1
 }
 
-# The router is PID 1, so its uid proves the entrypoint dropped privileges. Checking
-# /proc is required because the image intentionally has no USER directive, which means
-# docker exec itself still runs as root.
+# The router is PID 1, so its uid is the uid that serves traffic.
 process_uid() {
   docker exec "$1" sh -c "grep '^Uid:' /proc/1/status | awk '{print \$2}'"
 }
 
-# Reproduces a data directory that belongs to root, which is what a bind mount looks
-# like on Linux (Coolify's persistent storage included) and what Docker Desktop hides by
-# presenting bind mounts as writable regardless of ownership. The marker file is
-# essential: Docker re-initializes an *empty* named volume from the image, which would
-# restore the directory to the runtime user and hide the behaviour under test.
-prepare_root_owned_volume() {
+# The persisted files are read and edited through a throwaway container, which is how an
+# operator would edit them on the host, and which keeps these checks independent of the
+# router container's state.
+read_config() {
+  docker run --rm --volume "$data_volume:/data" --entrypoint cat "$image" "$config_path"
+}
+
+edit_config() {
+  docker run --rm --volume "$data_volume:/data" --entrypoint sed "$image" -i "$1" "$config_path"
+}
+
+volume_has_config() {
+  docker run --rm --volume "$data_volume:/data" --entrypoint sh "$image" \
+    -c "test -f '$config_path'"
+}
+
+# Reproduces a volume the router cannot write to, which is also what a host bind mount
+# not chowned to 1654 looks like. The marker file is essential: Docker re-initializes an
+# *empty* named volume from the image, which would restore the directory to the runtime
+# user and hide the behaviour under test.
+prepare_unusable_volume() {
   docker rm --force "$probe" >/dev/null 2>&1 || true
   docker volume rm --force "$blocked_volume" >/dev/null 2>&1 || true
   docker volume create "$blocked_volume" >/dev/null
@@ -165,33 +180,32 @@ assert_compose_build_context
 echo "==> Building $image"
 docker build --file "$repo_root/scripts/container/Dockerfile" --tag "$image" "$repo_root"
 
-echo "==> Starting container"
-start_container
+# The router must never run as root, and the image must not start as root either, because
+# a root entrypoint that claims the mounted volume would take the host directory away
+# from its owner.
+image_user="$(docker inspect --format '{{.Config.User}}' "$image")"
+[[ "$image_user" == "1654:1654" ]] || fail "the image declares user '$image_user' instead of 1654:1654"
 
-echo "==> Waiting for readiness"
-for _ in $(seq 1 60); do
-  curl --fail --silent "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 && break
-  if ! is_running "$container"; then
-    docker logs "$container" >&2
-    fail "container exited before becoming ready"
-  fi
-  sleep 1
-done
-curl --fail --silent "http://127.0.0.1:$port/health/ready" >/dev/null || fail "readiness endpoint never answered"
+echo "==> Starting the container on a fresh volume"
+docker volume rm --force "$data_volume" >/dev/null 2>&1 || true
+docker volume create "$data_volume" >/dev/null
+start_container
+wait_for_ready "$container" || {
+  docker logs "$container" >&2
+  fail "the container did not become ready"
+}
 
 echo "==> Asserting the configuration file was seeded into the volume"
-[[ -f "$config_path" ]] || fail "$config_path was not seeded"
+volume_has_config || fail "$config_path was not seeded"
+content="$(read_config)" || fail "$config_path is unreadable"
+grep -q '"routerKely"' <<< "$content" || fail "the seeded configuration is not the expected template"
+grep -q '"maxConcurrentRequests": 256' <<< "$content" || fail "the seeded configuration was modified"
 
-echo "==> Asserting the router runs unprivileged on a read-only root filesystem"
-# A bind-mounted directory owned by the host user is the case that regresses silently:
-# the container starts as root only to claim /data, then re-executes as uid 1654.
+echo "==> Asserting the router is unprivileged on a read-only root filesystem"
 [[ "$(process_uid "$container")" == "1654" ]] ||
   fail "the router process runs as uid $(process_uid "$container") instead of 1654"
 docker exec "$container" sh -c 'touch /app/probe' 2>/dev/null &&
   fail "the container root filesystem is writable"
-content="$(cat "$config_path")" || fail "the seeded configuration is unreadable on the host"
-grep -q '"routerKely"' <<< "$content" || fail "the seeded configuration is not the expected template"
-grep -q '"maxConcurrentRequests": 256' <<< "$content" || fail "the seeded configuration was modified"
 
 echo "==> Asserting the image health check succeeds"
 docker exec "$container" /usr/local/bin/healthcheck.sh || fail "the health check script failed"
@@ -206,19 +220,18 @@ status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
 [[ "$status" == "401" ]] || fail "configuration placeholder key returned $status instead of 401"
 
 echo "==> Asserting an edited configuration survives a restart"
-docker rm --force "$container" >/dev/null
-sed 's/"maxConcurrentRequests": 256/"maxConcurrentRequests": 128/' "$config_path" > "$config_path.edited"
-mv "$config_path.edited" "$config_path"
+edit_config 's/"maxConcurrentRequests": 256/"maxConcurrentRequests": 128/'
+docker rm --force "$container" >/dev/null 2>&1 || true
 start_container
 wait_for_ready "$container" || {
   docker logs "$container" >&2
   fail "the container did not become ready after the configuration was edited"
 }
-grep -q '"maxConcurrentRequests": 128' "$config_path" ||
+grep -q '"maxConcurrentRequests": 128' <<< "$(read_config)" ||
   fail "the container overwrote the operator's configuration file"
 
 echo "==> Asserting startup fails without the required secrets"
-docker rm --force "$container" "$probe" >/dev/null 2>&1 || true
+docker rm --force "$probe" >/dev/null 2>&1 || true
 docker run --detach --name "$probe" "$image" >/dev/null
 wait_for_exit "$probe" || fail "container started without ROUTERKELY_ADMIN_API_KEY and ROUTERKELY_DEEPSEEK_API_KEY"
 docker logs "$probe" >"$work_dir/missing-secrets.log" 2>&1 || true
@@ -227,77 +240,29 @@ grep -q "ROUTERKELY_ADMIN_API_KEY" "$work_dir/missing-secrets.log" ||
 docker rm --force "$probe" >/dev/null
 
 echo "==> Asserting an edited configuration in the volume is validated on startup"
-sed 's/"maxConcurrentRequests": 128/"maxConcurrentRequests": 0/' "$config_path" > "$config_path.edited"
-mv "$config_path.edited" "$config_path"
+edit_config 's/"maxConcurrentRequests": 128/"maxConcurrentRequests": 0/'
+docker rm --force "$container" >/dev/null 2>&1 || true
 start_container
 wait_for_exit "$container" || fail "container kept running despite an invalid MaxConcurrentRequests"
 docker logs "$container" >"$work_dir/invalid-config.log" 2>&1 || true
 grep -q "MaxConcurrentRequests" "$work_dir/invalid-config.log" ||
   fail "the invalid configuration was rejected without naming MaxConcurrentRequests"
+docker rm --force "$container" >/dev/null 2>&1 || true
 
-echo "==> Asserting a named volume works with no host-side preparation"
-docker rm --force "$container" "$probe" "$named_container" >/dev/null 2>&1 || true
-docker volume rm --force "$named_volume" >/dev/null 2>&1 || true
-docker volume create "$named_volume" >/dev/null
-container_env --detach --name "$named_container" \
-  --publish "127.0.0.1:$port:8080" \
-  --volume "$named_volume:/data" \
-  --read-only \
-  --security-opt no-new-privileges:true >/dev/null
-wait_for_ready "$named_container" || {
-  docker logs "$named_container" >&2
-  fail "the container did not become ready with a named volume"
-}
-[[ "$(process_uid "$named_container")" == "1654" ]] ||
-  fail "the router runs as uid $(process_uid "$named_container") instead of 1654 with a named volume"
-# A named volume lives in the daemon's own filesystem, so ownership is authoritative on
-# every platform, unlike a Docker Desktop bind mount.
-[[ "$(docker exec "$named_container" stat -c '%u' /data/router-kely.local.json)" == "1654" ]] ||
-  fail "the seeded configuration in the named volume is not owned by uid 1654"
-curl --fail --silent --output /dev/null \
-  --header "Authorization: Bearer $admin_key" \
-  "http://127.0.0.1:$port/v1/models" || fail "the named volume deployment is not serving requests"
-docker rm --force "$named_container" >/dev/null
-docker volume rm --force "$named_volume" >/dev/null
-
-# The case that broke on a native Linux daemon and works in production: a mounted
-# directory owned by root. The entrypoint must claim it and then drop privileges, or the
-# router cannot write the identity file the admin UI rewrites.
-echo "==> Asserting a root-owned volume is claimed and handed to the runtime user"
-prepare_root_owned_volume
-container_env --detach --name "$named_container" \
-  --publish "127.0.0.1:$port:8080" \
-  --volume "$blocked_volume:/data" \
-  --read-only \
-  --security-opt no-new-privileges:true >/dev/null
-wait_for_ready "$named_container" || {
-  docker logs "$named_container" >&2
-  fail "the container did not recover a root-owned volume"
-}
-[[ "$(process_uid "$named_container")" == "1654" ]] ||
-  fail "the router runs as uid $(process_uid "$named_container") instead of 1654 after claiming the volume"
-[[ "$(docker exec "$named_container" stat -c '%u' /data)" == "1654" ]] ||
-  fail "the entrypoint did not take ownership of the root-owned volume"
-# The seeded file proves the app itself can write, not just the entrypoint.
-[[ "$(docker exec "$named_container" stat -c '%u' /data/router-kely.local.json)" == "1654" ]] ||
-  fail "the seeded configuration is not owned by uid 1654 on a root-owned volume"
-curl --fail --silent --output /dev/null \
-  --header "Authorization: Bearer $admin_key" \
-  "http://127.0.0.1:$port/v1/models" || fail "the root-owned volume deployment is not serving requests"
-docker rm --force "$named_container" >/dev/null
-docker volume rm --force "$blocked_volume" >/dev/null
-
-# Uses a named volume rather than a bind mount so the permission check holds on every
-# platform. --user skips the entrypoint's root step, which would otherwise claim the
-# directory and hide the failure.
-echo "==> Asserting an unwritable volume is reported clearly"
-docker rm --force "$container" "$probe" "$named_container" >/dev/null 2>&1 || true
-prepare_root_owned_volume
-container_env --detach --name "$probe" --user 1654:1654 --volume "$blocked_volume:/data" >/dev/null
+# A Docker volume is what an orchestrator provides by default and is writable by the
+# runtime user because it inherits the image's /data ownership, so no host preparation is
+# needed. A host bind mount is not: the container never runs as root and must not take
+# the directory over, so the check below covers both the unrecoverable case and the
+# diagnostic that tells the operator to chown the directory.
+echo "==> Asserting a volume the router cannot write to is reported clearly"
+prepare_unusable_volume
+container_env --detach --name "$probe" --volume "$blocked_volume:/data" >/dev/null
 if wait_for_exit "$probe"; then
-  docker logs "$probe" >"$work_dir/unwritable.log" 2>&1 || true
-  grep -q "not writable" "$work_dir/unwritable.log" ||
-    fail "an unwritable volume did not produce a clear diagnostic"
+  docker logs "$probe" >"$work_dir/unusable.log" 2>&1 || true
+  grep -q "not writable" "$work_dir/unusable.log" ||
+    fail "an unusable volume did not produce a clear diagnostic"
+  grep -q "chown the host directory" "$work_dir/unusable.log" ||
+    fail "the diagnostic did not explain the remedy"
 else
   fail "the container kept running with a volume it cannot write to"
 fi

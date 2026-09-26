@@ -40,18 +40,15 @@ RUN dotnet publish src/RouterKely/RouterKely.csproj \
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine AS runtime
 
 # /data is the only writable location: it keeps the configuration file the operator
-# edits and the identity file the admin UI rewrites. The directory is owned by the
-# runtime user so a named volume inherits working permissions.
+# edits and the identity file the admin UI rewrites. It is owned by the runtime user so
+# a Docker volume mounted here inherits working permissions.
 # ROUTERKELY_LISTEN_URL overrides the listen URL from the configuration file and
 # must stay reachable from the platform's reverse proxy.
 ENV ROUTERKELY_CONFIG=/data/router-kely.local.json \
     ROUTERKELY_LISTEN_URL=http://0.0.0.0:8080 \
     ROUTERKELY_HEALTH_URL=http://127.0.0.1:8080/health/ready
 
-# su-exec lets the entrypoint hand a bind-mounted volume to the runtime user and then
-# drop privileges; it is the only addition to the base image (65 KiB).
-RUN apk add --no-cache su-exec \
- && mkdir -p /data \
+RUN mkdir -p /data \
  && chown app:app /data \
  && chmod 0700 /data
 
@@ -64,11 +61,11 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 VOLUME ["/data"]
 EXPOSE 8080
 
-# The image deliberately has no USER directive. The entrypoint starts as root only to
-# take ownership of a host-mounted /data directory, then drops to the unprivileged
-# "app" user (uid 1654) before the router process starts. Starting the router itself as
-# root is never required, and platforms that force a non-root user still work as long
-# as the volume is writable by uid 1654.
+# The container is unprivileged for its whole lifetime: it never starts as root, so it
+# cannot take ownership of a mount. The volume therefore has to be writable by this
+# user already, which a Docker volume is because it inherits the ownership above.
+USER 1654:1654
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/usr/local/bin/healthcheck.sh"]
 
