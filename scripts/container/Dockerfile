@@ -42,10 +42,8 @@ FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine AS runtime
 # /data is the only writable location: it keeps the configuration file the operator
 # edits and the identity file the admin UI rewrites. It is owned by the runtime user so
 # a Docker volume mounted here inherits working permissions.
-# ROUTERKELY_LISTEN_URL overrides the listen URL from the configuration file and
-# must stay reachable from the platform's reverse proxy.
+# ROUTERKELY_HEALTH_URL is the readiness URL the image health check probes.
 ENV ROUTERKELY_CONFIG=/data/router-kely.local.json \
-    ROUTERKELY_LISTEN_URL=http://0.0.0.0:8080 \
     ROUTERKELY_HEALTH_URL=http://127.0.0.1:8080/health/ready
 
 RUN mkdir -p /data \

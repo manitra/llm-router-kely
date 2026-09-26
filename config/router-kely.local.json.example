@@ -1,7 +1,7 @@
 {
   "routerKely": {
-    "listenUrl": "http://127.0.0.1:8080",
-    "clientApiKey": "sk-rk-local-change-me",
+    "listenUrl": "http://0.0.0.0:8080",
+    "clientApiKey": "${ROUTERKELY_ADMIN_API_KEY}",
     "identity": {
       "filePath": "router-kely.identities.json",
       "maxUsers": 256,
@@ -13,7 +13,7 @@
     },
     "upstream": {
       "baseUrl": "https://api.deepseek.com/v1/",
-      "apiKey": "replace-with-your-deepseek-api-key"
+      "apiKey": "${ROUTERKELY_DEEPSEEK_API_KEY}"
     },
     "models": [
       {

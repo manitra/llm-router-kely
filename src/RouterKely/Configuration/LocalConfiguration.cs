@@ -13,14 +13,24 @@ public sealed class LocalConfiguration
             throw new InvalidOperationException(
                 $"Configuration file '{path}' was not found. Copy config/router-kely.local.json.example first.");
 
+        LocalConfiguration configuration = LoadRaw(path);
+        configuration.RouterKely.ExpandEnvironmentReferences();
+        configuration.RouterKely.Validate();
+        return configuration;
+    }
+
+    public static LocalConfiguration LoadRaw(string path)
+    {
+        if (!File.Exists(path))
+            throw new InvalidOperationException(
+                $"Configuration file '{path}' was not found. Copy config/router-kely.local.json.example first.");
+
         LocalConfiguration configuration = JsonSerializer.Deserialize(
             File.ReadAllBytes(path),
             LocalConfigurationJsonContext.Default.LocalConfiguration)
             ?? throw new InvalidOperationException("Configuration is empty.");
 
         configuration.RouterKely.ResolvePaths(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        configuration.RouterKely.ApplyEnvironmentOverrides();
-        configuration.RouterKely.Validate();
         return configuration;
     }
 }
@@ -31,7 +41,7 @@ public sealed class RouterConfiguration
 
     public string ClientApiKey { get; set; } = string.Empty;
 
-    public UpstreamConfiguration Upstream { get; init; } = new();
+    public UpstreamConfiguration Upstream { get; set; } = new();
 
     public IdentityConfiguration Identity { get; set; } = new();
 
@@ -53,13 +63,33 @@ public sealed class RouterConfiguration
 
     internal int EffectiveMaxConcurrentRequestsPerUser => MaxConcurrentRequestsPerUser ?? 32;
 
-    internal void ApplyEnvironmentOverrides()
+    internal void ExpandEnvironmentReferences()
     {
         Identity ??= new IdentityConfiguration();
         Statistics ??= new StatisticsConfiguration();
-        ListenUrl = Environment.GetEnvironmentVariable("ROUTERKELY_LISTEN_URL") ?? ListenUrl;
-        ClientApiKey = Environment.GetEnvironmentVariable("ROUTERKELY_ADMIN_API_KEY") ?? ClientApiKey;
-        Upstream.ApiKey = Environment.GetEnvironmentVariable("ROUTERKELY_DEEPSEEK_API_KEY") ?? Upstream.ApiKey;
+
+        ClientApiKey = EnvironmentExpander.Expand(ClientApiKey, "RouterKely.ClientApiKey");
+        ListenUrl = EnvironmentExpander.Expand(ListenUrl, "RouterKely.ListenUrl");
+        Upstream = Upstream with
+        {
+            ApiKey = EnvironmentExpander.Expand(Upstream.ApiKey, "RouterKely.Upstream.ApiKey"),
+            BaseUrl = EnvironmentExpander.Expand(Upstream.BaseUrl, "RouterKely.Upstream.BaseUrl"),
+        };
+        Identity = Identity with
+        {
+            FilePath = EnvironmentExpander.Expand(Identity.FilePath, "RouterKely.Identity.FilePath"),
+            EnvironmentAdminName = EnvironmentExpander.Expand(Identity.EnvironmentAdminName, "RouterKely.Identity.EnvironmentAdminName"),
+            EnvironmentAdminEmail = EnvironmentExpander.Expand(Identity.EnvironmentAdminEmail, "RouterKely.Identity.EnvironmentAdminEmail"),
+        };
+        for (int index = 0; index < Models.Length; index++)
+        {
+            ModelConfiguration model = Models[index];
+            Models[index] = model with
+            {
+                Alias = EnvironmentExpander.Expand(model.Alias, $"RouterKely.Models[{index}].Alias"),
+                UpstreamModel = EnvironmentExpander.Expand(model.UpstreamModel, $"RouterKely.Models[{index}].UpstreamModel"),
+            };
+        }
     }
 
     internal void ResolvePaths(string configurationDirectory)
@@ -110,7 +140,7 @@ public sealed class RouterConfiguration
     }
 }
 
-public sealed class IdentityConfiguration
+public sealed record IdentityConfiguration
 {
     public string FilePath { get; set; } = "router-kely.identities.json";
 
@@ -139,7 +169,7 @@ public sealed class IdentityConfiguration
     }
 }
 
-public sealed class UpstreamConfiguration
+public sealed record UpstreamConfiguration
 {
     public string BaseUrl { get; init; } = "https://api.deepseek.com/v1/";
 
@@ -148,7 +178,7 @@ public sealed class UpstreamConfiguration
     public bool AllowInsecureLoopback { get; init; }
 }
 
-public sealed class ModelConfiguration
+public sealed record ModelConfiguration
 {
     public string Alias { get; init; } = string.Empty;
 

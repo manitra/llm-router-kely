@@ -453,7 +453,7 @@ The UI uses the pinned Pico CSS 2.1.1 classless build. Its minified stylesheet i
 
 The initial administration UI is intentionally one server-rendered users table plus one upsert user form. The list page contains no forms other than sign-out; every row offers an `Edit` link and the table footer offers an `Add user` link, and both open the same form at `/ui/admin/users/new` or `/ui/admin/users/{id}`. `POST /ui/actions/users` upserts: an absent `id` creates a user, a present `id` updates name, email, quota, and enabled state. “Remove user” means disabling the user via that form; “remove key” means revoking the key. Neither operation physically deletes identity history. The user form generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
 
-A server-rendered configuration editor at `/ui/admin/config` exposes the non-secret fields of the runtime configuration file: `listenUrl`, `upstream.baseUrl`, `upstream.allowInsecureLoopback`, identity limits, model aliases/upstream IDs/prices/token caps/capability flags, default daily quota, body/prefix/concurrency limits, and statistics retention. The form POSTs to `/ui/actions/config`, which atomically writes a temporary file in the same directory and renames it over the original before reporting success. Because the configuration is read once at startup, the page always carries a banner explaining that changes only apply after a restart and never replaces the running snapshot on its own. `clientApiKey` and `upstream.apiKey` are intentionally absent from the form because the default provider sources them from environment variables (or mounted secret files); the page surfaces them as `***` so the operator knows the file is the wrong place to look. Editing non-existent or malformed values fails the same validation the startup path runs, so an invalid form cannot leave a half-written file behind. The editor requires an admin session, the same-origin/CSRF guard, and signed-in role as every other control-plane action.
+A server-rendered configuration editor at `/ui/admin/config` exposes the runtime configuration file: `listenUrl`, `clientApiKey`, `upstream.baseUrl`, `upstream.apiKey`, `upstream.allowInsecureLoopback`, identity limits, model aliases/upstream IDs/prices/token caps/capability flags, default daily quota, body/prefix/concurrency limits, and statistics retention. The form POSTs to `/ui/actions/config`, which atomically writes a temporary file in the same directory and renames it over the original before reporting success. Because the configuration is read once at startup, the page always carries a banner explaining that changes only apply after a restart and never replaces the running snapshot on its own. Secret fields are not redacted; the editor shows their literal value (typically a `${NAME}` reference) so the operator can see exactly which environment variable must be configured in the platform. Editing non-existent or malformed values fails the same validation the startup path runs, so an invalid form cannot leave a half-written file behind. The editor requires an admin session, the same-origin/CSRF guard, and signed-in role as every other control-plane action.
 
 ### 10.2 Browser session
 
@@ -881,9 +881,27 @@ Example:
 
 Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing.
 
+#### Environment expansion
+
+Any string value in the configuration file may embed `${NAME}` references. The literal text is written to disk; at startup LLM Router Kely walks every string field, resolves each reference against the process environment, and validates the result. A missing variable fails startup with a message that names the field path (for example `RouterKely.Upstream.ApiKey`) and the variable name, so the operator sees which environment entry the platform must inject. A literal `$` is produced with `$$`. The expansion is intentionally pure text replacement: no shell-style defaults, no command substitution, no recursion. Because the on-disk text is preserved verbatim, the admin configuration editor shows the literal `${VAR}` reference, not the resolved secret, and edits round-trip without leaking plaintext into the file. The shipped example uses this for every secret:
+
+```json
+{
+  "routerKely": {
+    "clientApiKey": "${ROUTERKELY_ADMIN_API_KEY}",
+    "upstream": {
+      "baseUrl": "https://api.deepseek.com/v1/",
+      "apiKey": "${ROUTERKELY_DEEPSEEK_API_KEY}"
+    }
+  }
+}
+```
+
+The container entrypoint still refuses to start when the referenced environment variables are not set, so a missing platform secret surfaces as a clear error rather than an empty authorization header.
+
 Environment overrides use double underscores, for example `RouterKely__Upstream__BaseUrl`. Log the effective non-secret configuration at startup with secrets redacted.
 
-The example above is the target configuration model. The current implementation reads the flat file shown in `config/router-kely.local.json.example` and supports only the `ROUTERKELY_*` overrides listed in section 15.1; `appsettings.json`, the double-underscore binding, and the unimplemented properties above are not read.
+The example above is the target configuration model. The current implementation reads the flat file shown in `config/router-kely.local.json.example`, expands `${NAME}` references against the process environment, and supports the contract documented in section 15.1; `appsettings.json`, the double-underscore binding, and the unimplemented properties above are not read.
 
 The default identity file has this shape:
 
@@ -940,16 +958,15 @@ Container environment contract:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `ROUTERKELY_ADMIN_API_KEY` | yes | Administrator bearer key, replacing the placeholder in the seeded file. |
-| `ROUTERKELY_DEEPSEEK_API_KEY` | yes | Upstream credential, replacing the placeholder in the seeded file. |
-| `ROUTERKELY_LISTEN_URL` | no | Defaults to `http://0.0.0.0:8080` so the platform reverse proxy can reach the process. |
+| `ROUTERKELY_ADMIN_API_KEY` | yes | Administrator bearer key referenced as `${ROUTERKELY_ADMIN_API_KEY}` from the seeded configuration. |
+| `ROUTERKELY_DEEPSEEK_API_KEY` | yes | Upstream credential referenced as `${ROUTERKELY_DEEPSEEK_API_KEY}` from the seeded configuration. |
 | `ROUTERKELY_CONFIG` | no | Defaults to `/data/router-kely.local.json`. |
 | `ROUTERKELY_CONFIG_TEMPLATE` | no | Defaults to `/app/config/router-kely.local.json.example`. |
 | `ROUTERKELY_HEALTH_URL` | no | Defaults to `http://127.0.0.1:8080/health/ready`, used by the image health check. |
 
 Container behavior:
 
-- The entrypoint refuses to start when either secret is missing, because the seeded file contains placeholder values that would otherwise be accepted.
+- The entrypoint refuses to start when either referenced secret is missing, because the seeded configuration file carries `${NAME}` references that cannot resolve.
 - On first start the entrypoint copies the template to `ROUTERKELY_CONFIG` with owner-only permissions and reports that the operator should edit it. An existing file is never overwritten, so operator edits survive restarts and redeployments.
 - The container never starts as root and MUST NOT take ownership of a mounted directory or otherwise modify host state, so `/data` has to be writable by uid `1654` before the container starts. Running as root merely to claim a bind mount was tried and rejected: it takes the directory away from its owner, which breaks host-side access and cleanup, and that failure is invisible on Docker Desktop because it presents bind mounts as writable regardless of ownership.
 - A Docker volume mounted at `/data` inherits the ownership of the image's `/data` directory, so it needs no host-side preparation; this is what an orchestrator's managed storage provides. A host bind mount MUST be chowned to `1654:1654`. When the directory is not writable, startup fails with a diagnostic that names the remedy rather than a bare `mkdir` or `cp` error.

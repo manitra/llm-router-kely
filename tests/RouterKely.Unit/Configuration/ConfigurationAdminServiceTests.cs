@@ -8,6 +8,14 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     private readonly string _tempPath = Path.Combine(
         Path.GetTempPath(),
         $"router-kely-config-{Guid.NewGuid():N}.json");
+    private const string AdminEnvVar = "ROUTERKELY_ADMIN_API_KEY";
+    private const string UpstreamEnvVar = "ROUTERKELY_DEEPSEEK_API_KEY";
+
+    public ConfigurationAdminServiceTests()
+    {
+        Environment.SetEnvironmentVariable(AdminEnvVar, "sk-rk-from-env");
+        Environment.SetEnvironmentVariable(UpstreamEnvVar, "sk-deepseek-from-env");
+    }
 
     public void Dispose()
     {
@@ -21,21 +29,25 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
         Seed();
         var service = new ConfigurationAdminService(_tempPath);
 
-        var form = ConfigurationAdminService.ToForm(service.Load());
+        var form = ConfigurationAdminService.ToForm(service.LoadRaw());
         form.ListenUrl = "http://127.0.0.1:9090";
         form.UpstreamBaseUrl = "https://api.deepseek.com/v1/";
         form.IdentityMaxUsers = "64";
         form.Models[0].Alias = "deepseek-fast-edited";
 
         service.Save(form);
-        LocalConfiguration reloaded = service.Load();
+        LocalConfiguration raw = service.LoadRaw();
+        LocalConfiguration expanded = service.Load();
 
-        Assert.Equal("http://127.0.0.1:9090", reloaded.RouterKely.ListenUrl);
-        Assert.Equal(64, reloaded.RouterKely.Identity.MaxUsers);
-        Assert.Equal("deepseek-fast-edited", reloaded.RouterKely.Models[0].Alias);
-        // Secrets are preserved untouched when round-tripping through the editor.
-        Assert.Equal("sk-rk-local-change-me", reloaded.RouterKely.ClientApiKey);
-        Assert.Equal("replace-with-your-deepseek-api-key", reloaded.RouterKely.Upstream.ApiKey);
+        Assert.Equal("http://127.0.0.1:9090", raw.RouterKely.ListenUrl);
+        Assert.Equal(64, raw.RouterKely.Identity.MaxUsers);
+        Assert.Equal("deepseek-fast-edited", raw.RouterKely.Models[0].Alias);
+        // The on-disk file keeps the literal ${VAR} reference; the resolved value
+        // only appears on the loaded/expanded object.
+        Assert.Equal("${ROUTERKELY_ADMIN_API_KEY}", raw.RouterKely.ClientApiKey);
+        Assert.Equal("${ROUTERKELY_DEEPSEEK_API_KEY}", raw.RouterKely.Upstream.ApiKey);
+        Assert.Equal("sk-rk-from-env", expanded.RouterKely.ClientApiKey);
+        Assert.Equal("sk-deepseek-from-env", expanded.RouterKely.Upstream.ApiKey);
     }
 
     [Fact]
@@ -43,7 +55,7 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     {
         Seed();
         var service = new ConfigurationAdminService(_tempPath);
-        var form = ConfigurationAdminService.ToForm(service.Load());
+        var form = ConfigurationAdminService.ToForm(service.LoadRaw());
         form.IdentityMaxUsers = "10";
 
         service.Save(form);
@@ -58,7 +70,7 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
         Seed();
         string original = File.ReadAllText(_tempPath);
         var service = new ConfigurationAdminService(_tempPath);
-        var form = ConfigurationAdminService.ToForm(service.Load());
+        var form = ConfigurationAdminService.ToForm(service.LoadRaw());
         form.IdentityMaxUsers = "0"; // below the configured minimum of 1
 
         var exception = Assert.Throws<InvalidOperationException>(() => service.Save(form));
@@ -71,7 +83,7 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     {
         Seed();
         var service = new ConfigurationAdminService(_tempPath);
-        var form = ConfigurationAdminService.ToForm(service.Load());
+        var form = ConfigurationAdminService.ToForm(service.LoadRaw());
         form.DailyQuotaUsd = string.Empty;
         service.Save(form);
 
@@ -83,11 +95,21 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     {
         Seed();
         var service = new ConfigurationAdminService(_tempPath);
-        ConfigForm form = ConfigurationAdminService.ToForm(service.Load());
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
 
         Assert.Equal("0", form.Models[0].InputUsdPerMillion);
     }
 
+    [Fact]
+    public void ToFormExposesLiteralEnvReferenceInsteadOfResolvedSecret()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+
+        Assert.Equal("${ROUTERKELY_ADMIN_API_KEY}", form.ClientApiKey);
+        Assert.Equal("${ROUTERKELY_DEEPSEEK_API_KEY}", form.UpstreamApiKey);
+    }
     private void Seed()
     {
         string template = Path.Combine(

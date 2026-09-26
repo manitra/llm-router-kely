@@ -297,7 +297,9 @@ public sealed class AdminUiService
         LocalConfiguration current;
         try
         {
-            current = _configurations.Load();
+            // Read the on-disk file (without expanding ${VAR}) so admins see the literal
+            // reference and can edit it instead of the resolved value.
+            current = _configurations.LoadRaw();
         }
         catch (InvalidOperationException exception)
         {
@@ -342,7 +344,8 @@ public sealed class AdminUiService
             .Append(Encode(_configurations.FilePath))
             .Append("</code></small></p>");
         html.Append("<p><strong>Changes take effect after restart.</strong> "
-            + "Secrets are read from environment variables, not this file.</p>");
+            + "Use <code>${NAME}</code> in any string field to reference an environment variable; "
+            + "the literal text is written to disk and the reference is resolved at startup.</p>");
         if (saved)
             html.Append("<p><mark>Configuration saved. Restart the router to apply.</mark></p>");
         if (error is not null)
@@ -353,6 +356,9 @@ public sealed class AdminUiService
         html.Append("<fieldset><legend>Server</legend>");
         html.Append("<label>Listen URL <input name=\"listenUrl\" required value=\"")
             .Append(Encode(form.ListenUrl)).Append("\"></label>");
+        html.Append("<label>Administrator API key <input name=\"clientApiKey\" required value=\"")
+            .Append(Encode(form.ClientApiKey)).Append("\"></label>");
+        html.Append("<p><small>Use <code>${ROUTERKELY_ADMIN_API_KEY}</code> to read the secret from the environment.</small></p>");
         html.Append("<label><input type=\"checkbox\" name=\"upstreamAllowInsecureLoopback\" value=\"true\"")
             .Append(form.UpstreamAllowInsecureLoopback ? " checked" : string.Empty)
             .Append("> Allow insecure loopback upstream</label>");
@@ -361,7 +367,9 @@ public sealed class AdminUiService
         html.Append("<fieldset><legend>Upstream</legend>");
         html.Append("<label>Base URL <input name=\"upstreamBaseUrl\" required value=\"")
             .Append(Encode(form.UpstreamBaseUrl)).Append("\"></label>");
-        html.Append("<p><small>API key: <code>***</code> (read from ROUTERKELY_DEEPSEEK_API_KEY)</small></p>");
+        html.Append("<label>API key <input name=\"upstreamApiKey\" required value=\"")
+            .Append(Encode(form.UpstreamApiKey)).Append("\"></label>");
+        html.Append("<p><small>Use <code>${ROUTERKELY_DEEPSEEK_API_KEY}</code> to read the secret from the environment.</small></p>");
         html.Append("</fieldset>");
 
         html.Append("<fieldset><legend>Identity</legend>");
@@ -429,7 +437,9 @@ public sealed class AdminUiService
         var parsed = new ConfigForm
         {
             ListenUrl = form["listenUrl"].ToString(),
+            ClientApiKey = form["clientApiKey"].ToString(),
             UpstreamBaseUrl = form["upstreamBaseUrl"].ToString(),
+            UpstreamApiKey = form["upstreamApiKey"].ToString(),
             UpstreamAllowInsecureLoopback = string.Equals(
                 form["upstreamAllowInsecureLoopback"].ToString(),
                 "true",

@@ -22,12 +22,18 @@ public sealed class ConfigurationAdminService
             return LocalConfiguration.Load(_path);
     }
 
+    public LocalConfiguration LoadRaw()
+    {
+        lock (_gate)
+            return LocalConfiguration.LoadRaw(_path);
+    }
+
     public LocalConfiguration Save(ConfigForm form)
     {
         ArgumentNullException.ThrowIfNull(form);
         lock (_gate)
         {
-            LocalConfiguration current = LocalConfiguration.Load(_path);
+            LocalConfiguration current = LocalConfiguration.LoadRaw(_path);
             LocalConfiguration updated = ApplyForm(current, form);
             WriteAtomic(updated);
             return updated;
@@ -50,7 +56,7 @@ public sealed class ConfigurationAdminService
         var upstream = new UpstreamConfiguration
         {
             BaseUrl = form.UpstreamBaseUrl.Trim(),
-            ApiKey = current.RouterKely.Upstream.ApiKey,
+            ApiKey = form.UpstreamApiKey.Trim(),
             AllowInsecureLoopback = form.UpstreamAllowInsecureLoopback,
         };
 
@@ -83,7 +89,7 @@ public sealed class ConfigurationAdminService
             RouterKely = new RouterConfiguration
             {
                 ListenUrl = form.ListenUrl.Trim(),
-                ClientApiKey = current.RouterKely.ClientApiKey,
+                ClientApiKey = form.ClientApiKey.Trim(),
                 Upstream = upstream,
                 Identity = identity,
                 Models = models,
@@ -161,7 +167,9 @@ public sealed class ConfigurationAdminService
     public static ConfigForm ToForm(LocalConfiguration configuration) => new()
     {
         ListenUrl = configuration.RouterKely.ListenUrl,
+        ClientApiKey = configuration.RouterKely.ClientApiKey,
         UpstreamBaseUrl = configuration.RouterKely.Upstream.BaseUrl,
+        UpstreamApiKey = configuration.RouterKely.Upstream.ApiKey,
         UpstreamAllowInsecureLoopback = configuration.RouterKely.Upstream.AllowInsecureLoopback,
         IdentityMaxUsers = configuration.RouterKely.Identity.MaxUsers.ToString(CultureInfo.InvariantCulture),
         IdentityMaxKeys = configuration.RouterKely.Identity.MaxKeys.ToString(CultureInfo.InvariantCulture),
@@ -195,7 +203,9 @@ public sealed class ConfigurationAdminService
 public sealed class ConfigForm
 {
     public string ListenUrl { get; set; } = string.Empty;
+    public string ClientApiKey { get; set; } = string.Empty;
     public string UpstreamBaseUrl { get; set; } = string.Empty;
+    public string UpstreamApiKey { get; set; } = string.Empty;
     public bool UpstreamAllowInsecureLoopback { get; set; }
     public string IdentityMaxUsers { get; set; } = "256";
     public string IdentityMaxKeys { get; set; } = "1024";
