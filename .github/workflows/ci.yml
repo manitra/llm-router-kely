@@ -64,3 +64,15 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+  container:
+    name: Container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build and verify the container image
+        shell: bash
+        run: ./scripts/container-tests.sh

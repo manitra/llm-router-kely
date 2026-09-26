@@ -880,6 +880,8 @@ Zero prices are permitted only in development. Production startup fails if any e
 
 Environment overrides use double underscores, for example `RouterKely__Upstream__BaseUrl`. Log the effective non-secret configuration at startup with secrets redacted.
 
+The example above is the target configuration model. The current implementation reads the flat file shown in `config/router-kely.local.json.example` and supports only the `ROUTERKELY_*` overrides listed in section 15.1; `appsettings.json`, the double-underscore binding, and the unimplemented properties above are not read.
+
 The default identity file has this shape:
 
 ```json
@@ -911,6 +913,46 @@ The default identity file has this shape:
 ```
 
 The environment administrator is merged into this document in memory after validation. Its reserved IDs MUST NOT appear in the file. `quotaNanoUsd` omitted or `null` means unlimited. Timestamps are intentionally absent from the default identity schema unless a demonstrated UI requirement justifies them.
+
+### 15.1 Container deployment
+
+The repository-root `scripts/container/Dockerfile` builds the certified single-container deployment. Docker artifacts live under `scripts/container/` so the repository root stays limited to component folders and essential project files; the build context is still the repository root.
+
+| Property | Value |
+|---|---|
+| Build command | `docker build -f scripts/container/Dockerfile .` |
+| Build context | Repository root, so the Dockerfile can read the sources |
+| Ignore rules | `scripts/container/Dockerfile.dockerignore`, applied because BuildKit requires this file to sit next to the Dockerfile and be named after it |
+| Build stage | `mcr.microsoft.com/dotnet/sdk:10.0-alpine` with `clang`, `build-base`, and `zlib-dev` |
+| Publish | `dotnet publish --configuration Release --runtime linux-musl-x64` or `linux-musl-arm64`, selected from `TARGETARCH` |
+| Runtime stage | `mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine` |
+| Process user | uid/gid `1654`, the non-root `app` user the base image provides |
+| Writable path | `/data` only, owned by `1654` with mode `0700`; the root filesystem is expected to be read-only |
+| Published port | `8080` |
+| Volume | `/data`, holding the configuration file and the identity file |
+
+Alpine is the smallest official runtime-deps base that still ships a shell: 11.1 MiB against 12.0 MiB for `10.0-noble-chiseled`, which has no shell and therefore cannot run the entrypoint or the health check. The cost is musl instead of glibc, so measure before switching: a glibc base requires changing the base image and the runtime identifier together. Because the image is musl-based, the `linux-musl-*` runtime identifiers are mandatory and a `linux-x64` binary does not run in it.
+
+Container environment contract:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `ROUTERKELY_ADMIN_API_KEY` | yes | Administrator bearer key, replacing the placeholder in the seeded file. |
+| `ROUTERKELY_DEEPSEEK_API_KEY` | yes | Upstream credential, replacing the placeholder in the seeded file. |
+| `ROUTERKELY_LISTEN_URL` | no | Defaults to `http://0.0.0.0:8080` so the platform reverse proxy can reach the process. |
+| `ROUTERKELY_CONFIG` | no | Defaults to `/data/router-kely.local.json`. |
+| `ROUTERKELY_CONFIG_TEMPLATE` | no | Defaults to `/app/config/router-kely.local.json.example`. |
+| `ROUTERKELY_HEALTH_URL` | no | Defaults to `http://127.0.0.1:8080/health/ready`, used by the image health check. |
+
+Container behavior:
+
+- The entrypoint refuses to start when either secret is missing, because the seeded file contains placeholder values that would otherwise be accepted.
+- On first start the entrypoint copies the template to `ROUTERKELY_CONFIG` with owner-only permissions and reports that the operator should edit it. An existing file is never overwritten, so operator edits survive restarts and redeployments.
+- The volume must be writable by uid `1654`. A named volume inherits the ownership baked into the image; a bind mount MUST be chowned to `1654:1654`. An unwritable volume fails startup with an explicit diagnostic.
+- The configuration and identity files are read once at startup, so a change requires a container restart. The admin UI rewrites the identity file while the container runs, so it MUST NOT be edited concurrently: either manage users through the UI or stop the container first.
+- TLS is terminated by the platform reverse proxy. The container listener stays plain HTTP on the internal network and MUST NOT be published without TLS in front of it. The process listens on `0.0.0.0`, which the platform proxy requires.
+- On a platform that asks for a build context and a Dockerfile path separately, the context is the repository root and the Dockerfile path is `scripts/container/Dockerfile`.
+- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, resolve of the compose build settings, first-boot seeding, non-root uid, read-only root filesystem, working health check, operator configuration surviving a restart, refusal of an invalid configuration, and the missing-secret and unwritable-volume diagnostics.
 
 ## 16. Security requirements
 
@@ -1259,8 +1301,13 @@ Recommended layout:
 /tests/RouterKely.Unit
 /tests/RouterKely.Integration
 /tests/RouterKely.Performance
-/deploy/Dockerfile
-/deploy/kubernetes           optional manifests
+/scripts/tests.sh               unit, AOT, integration, and performance suite
+/scripts/container-tests.sh     end-to-end container checks
+/scripts/container/Dockerfile   two-stage Alpine image, the certified deployment unit
+/scripts/container/Dockerfile.dockerignore   build-context filter for the Dockerfile
+/scripts/container/entrypoint.sh             first-boot configuration seeding and secret guard
+/scripts/container/healthcheck.sh            readiness probe used by the image health check
+/scripts/container/compose.yml               local run of the same image
 /docs/compatibility
 /plugins/RouterKely.Postgres optional post-MVP adapter; absent from the default build
 ```

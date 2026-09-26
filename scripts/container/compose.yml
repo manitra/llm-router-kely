@@ -1,0 +1,27 @@
+# Local container run. Coolify only needs the Dockerfile; this file exists to run
+# the image and the persisted /data volume locally with one command:
+#   ROUTERKELY_ADMIN_API_KEY=... ROUTERKELY_DEEPSEEK_API_KEY=... \
+#     docker compose -f scripts/container/compose.yml up --build
+services:
+  router-kely:
+    build:
+      # The Dockerfile needs the repository sources, so the context is the repo root.
+      context: ../..
+      dockerfile: scripts/container/Dockerfile
+    image: llm-router-kely:local
+    ports:
+      - "8080:8080"
+    environment:
+      ROUTERKELY_ADMIN_API_KEY: ${ROUTERKELY_ADMIN_API_KEY:?set ROUTERKELY_ADMIN_API_KEY first}
+      ROUTERKELY_DEEPSEEK_API_KEY: ${ROUTERKELY_DEEPSEEK_API_KEY:?set ROUTERKELY_DEEPSEEK_API_KEY first}
+    volumes:
+      # The named volume holds the configuration and identity files. A bind mount
+      # works too, but then the host directory must be chowned to 1654:1654.
+      - router-kely-data:/data
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  router-kely-data:

@@ -38,8 +38,21 @@ dotnet build RouterKely.slnx --configuration Release
 dotnet run --project src/RouterKely/RouterKely.csproj --configuration Release
 ```
 
+## Deploy
+
+Coolify and any Docker host build the image from `scripts/container/Dockerfile`; it runs unprivileged on Alpine. Docker stays out of the repository root, so nothing changes for the .NET workflow.
+
+```bash
+ROUTERKELY_ADMIN_API_KEY=sk-rk_... ROUTERKELY_DEEPSEEK_API_KEY=sk-... \
+  docker compose -f scripts/container/compose.yml up --build
+```
+
+Mount a persistent volume at `/data`. It holds `router-kely.local.json` and the `router-kely.identities.json` the admin UI rewrites. On the first start the container seeds the configuration from the image default; edit it and restart the container to apply changes, or manage users in the admin UI. Secrets live in the environment, never in the volume.
+
+On Coolify: create the app with the **Dockerfile** build pack from this repository, set **Base Directory** to `/` and **Dockerfile Location** to `/scripts/container/Dockerfile`, set the two secret variables, add a volume mount at `/data`, expose port `8080`, and deploy. The first deployment creates the configuration file in the volume for you to edit.
+
 ## Maintain
 
-Run the complete unit, Native AOT, integration, and performance suite with `./scripts/tests.sh`. Performance badges show the latest successful `main` run on GitHub-hosted Linux; enable GitHub Pages with **GitHub Actions** as its source to publish them.
+Run the complete unit, Native AOT, integration, and performance suite with `./scripts/tests.sh`, and the container checks with `./scripts/container-tests.sh`. Performance badges show the latest successful `main` run on GitHub-hosted Linux; enable GitHub Pages with **GitHub Actions** as its source to publish them.
 
 See [spec.md](spec.md) for detailed specifications, contracts, and architecture.
