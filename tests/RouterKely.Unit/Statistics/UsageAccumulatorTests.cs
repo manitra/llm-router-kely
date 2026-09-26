@@ -1,3 +1,4 @@
+using RouterKely.Core.Identity;
 using RouterKely.Core.Routing;
 using RouterKely.Core.Statistics;
 using Xunit;
@@ -10,20 +11,27 @@ public sealed class UsageAccumulatorTests
     public async Task ExchangeFeedsInMemoryProviderAndUpdatesQuota()
     {
         var route = new ModelRoute(0, "deepseek-fast", "deepseek-chat");
-        var accumulator = new UsageAccumulator(7, 42, [route], 1_000);
+        var identities = new IdentitySnapshot(
+            1,
+            [new IdentityUser(7, "User", "user@example.com", IdentityRole.User, true, 1_000)],
+            [new IdentityKey(42, 7, "Key", new string('0', 64), "sk-rk_test", "test", true)]);
+        var accumulator = new UsageAccumulator([route], identities);
+        Assert.True(accumulator.TryGetAccount(42, out UsageAccount? account));
         var provider = new InMemoryStatisticsProvider();
         var usage = new UsageObservation(100, 20, 30, true);
 
-        accumulator.Record(route, UsageOutcome.Success, usage, 250, 10);
+        account!.Record(route, UsageOutcome.Success, usage, 250, 10);
         UsageBatch batch = accumulator.ExchangePending(DateTimeOffset.UtcNow);
         await provider.WriteAsync(batch, CancellationToken.None);
         StatisticsSnapshot snapshot = await provider.QueryAsync(
             DateOnly.FromDateTime(DateTime.UtcNow),
             DateOnly.FromDateTime(DateTime.UtcNow),
+            7,
+            42,
             CancellationToken.None);
 
-        Assert.Equal(250, accumulator.Quota.CurrentUsageNanoUsd);
-        Assert.False(accumulator.Quota.IsExceeded);
+        Assert.Equal(250, account.Quota.CurrentUsageNanoUsd);
+        Assert.False(account.Quota.IsExceeded);
         DailyUsage day = Assert.Single(snapshot.Days);
         Assert.Equal(1, day.RequestCount);
         Assert.Equal(100, day.InputTokens);
@@ -31,7 +39,7 @@ public sealed class UsageAccumulatorTests
         Assert.Equal(250, day.CostNanoUsd);
         Assert.Empty(accumulator.ExchangePending(DateTimeOffset.UtcNow).Entries);
 
-        accumulator.Record(route, UsageOutcome.Success, usage, 750, 10);
-        Assert.True(accumulator.Quota.IsExceeded);
+        account.Record(route, UsageOutcome.Success, usage, 750, 10);
+        Assert.True(account.Quota.IsExceeded);
     }
 }

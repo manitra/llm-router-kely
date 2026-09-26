@@ -2,10 +2,13 @@ using System.Net;
 using RouterKely.Compatibility;
 using RouterKely.Configuration;
 using RouterKely.Core.Authentication;
+using RouterKely.Core.Identity;
 using RouterKely.Core.Routing;
 using RouterKely.Core.Statistics;
+using RouterKely.Identity;
 using RouterKely.Proxy;
 using RouterKely.Statistics;
+using RouterKely.Ui;
 
 string configPath = Environment.GetEnvironmentVariable("ROUTERKELY_CONFIG")
     ?? FindLocalConfiguration();
@@ -44,11 +47,31 @@ ModelRoute[] routes = configuration.Models
         model.SupportsReasoning))
     .ToArray();
 
-var authenticator = new ApiKeyAuthenticator(configuration.ClientApiKey);
+var identityProvider = new FileIdentityProvider(
+    configuration.Identity.FilePath,
+    configuration.Identity.MaxUsers,
+    configuration.Identity.MaxKeys,
+    configuration.Identity.EnvironmentAdminUserId,
+    configuration.Identity.EnvironmentAdminKeyId);
+IdentitySnapshot fileIdentities = await identityProvider.LoadAsync(CancellationToken.None);
+var environmentAdmin = new IdentityUser(
+    configuration.Identity.EnvironmentAdminUserId,
+    configuration.Identity.EnvironmentAdminName,
+    configuration.Identity.EnvironmentAdminEmail,
+    IdentityRole.Admin,
+    true,
+    configuration.DailyQuotaNanoUsd,
+    true);
+var authenticator = new ApiKeyAuthenticator(
+    configuration.ClientApiKey,
+    environmentAdmin,
+    configuration.Identity.EnvironmentAdminKeyId,
+    "Environment administrator",
+    fileIdentities);
 var statistics = new InMemoryStatisticsProvider(
     configuration.Statistics.HourlyRetentionHours,
     configuration.Statistics.DailyRetentionDays);
-var usage = new UsageAccumulator(1, 1, routes, configuration.DailyQuotaNanoUsd);
+var usage = new UsageAccumulator(routes, authenticator.Snapshot);
 var proxy = new ProxyService(
     authenticator,
     client,
@@ -64,14 +87,7 @@ var compatibility = new CompatibilityService(
     authenticator,
     routes,
     usage,
-    statistics,
-    new CompatibilityIdentity(
-        1,
-        "Local Administrator",
-        "admin@localhost",
-        1,
-        "Local VS Code",
-        MaskKey(configuration.ClientApiKey)));
+    statistics);
 
 builder.Services.AddSingleton<IHostedService>(_ => new StatisticsPump(
     usage,
@@ -79,6 +95,14 @@ builder.Services.AddSingleton<IHostedService>(_ => new StatisticsPump(
     TimeSpan.FromMilliseconds(configuration.Statistics.FlushIntervalMilliseconds)));
 
 WebApplication app = builder.Build();
+var identityAdmin = new IdentityAdminService(
+    identityProvider,
+    fileIdentities,
+    authenticator,
+    usage,
+    app.Logger);
+var sessions = new UiSessionStore(authenticator);
+var ui = new AdminUiService(authenticator, identityAdmin, sessions);
 
 app.MapGet("/", static () => Results.Text("Router Kely is running. Use /v1 as the OpenAI-compatible base path.\n"));
 app.MapGet("/health/live", static () => Results.Text("{\"status\":\"ok\"}", "application/json"));
@@ -91,6 +115,17 @@ app.MapGet("/key/info", compatibility.WriteKeyInfoAsync);
 app.MapGet("/user/daily/activity", compatibility.WriteDailyActivityAsync);
 app.MapPost("/v1/chat/completions", proxy.ProxyChatCompletionsAsync);
 app.MapPost("/chat/completions", proxy.ProxyChatCompletionsAsync);
+app.MapGet("/ui", ui.RootAsync);
+app.MapGet("/ui/login", ui.LoginPageAsync);
+app.MapPost("/ui/login", ui.LoginAsync);
+app.MapPost("/ui/logout", ui.LogoutAsync);
+app.MapGet("/ui/admin/users", ui.UsersAsync);
+app.MapGet("/ui/admin/users/{id:long}", ui.UserAsync);
+app.MapPost("/ui/actions/users/create", ui.CreateUserAsync);
+app.MapPost("/ui/actions/users/{id:long}/disable", ui.DisableUserAsync);
+app.MapPost("/ui/actions/users/{id:long}/enable", ui.EnableUserAsync);
+app.MapPost("/ui/actions/users/{id:long}/keys/create", ui.CreateKeyAsync);
+app.MapPost("/ui/actions/keys/{id:long}/revoke", ui.RevokeKeyAsync);
 
 await app.RunAsync();
 
@@ -106,10 +141,4 @@ static string FindLocalConfiguration()
     }
 
     return Path.Combine(Directory.GetCurrentDirectory(), "config", "router-kely.local.json");
-}
-
-static string MaskKey(string key)
-{
-    ReadOnlySpan<char> lastFour = key.Length >= 4 ? key.AsSpan(key.Length - 4) : key.AsSpan();
-    return $"sk-rk_…{lastFour}";
 }

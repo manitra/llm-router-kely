@@ -3,7 +3,7 @@ namespace RouterKely.Core.Statistics;
 public sealed class DailyQuotaCounter
 {
     private readonly object _rolloverGate = new();
-    private readonly long? _quotaNanoUsd;
+    private long _quotaNanoUsd;
     private long _dayNumber = UtcDayNumber();
     private long _usageNanoUsd;
 
@@ -12,10 +12,17 @@ public sealed class DailyQuotaCounter
         if (quotaNanoUsd < 0)
             throw new ArgumentOutOfRangeException(nameof(quotaNanoUsd));
 
-        _quotaNanoUsd = quotaNanoUsd;
+        _quotaNanoUsd = quotaNanoUsd ?? -1;
     }
 
-    public long? QuotaNanoUsd => _quotaNanoUsd;
+    public long? QuotaNanoUsd
+    {
+        get
+        {
+            long quota = Volatile.Read(ref _quotaNanoUsd);
+            return quota < 0 ? null : quota;
+        }
+    }
 
     public long CurrentUsageNanoUsd
     {
@@ -27,7 +34,14 @@ public sealed class DailyQuotaCounter
     }
 
     public bool IsExceeded =>
-        _quotaNanoUsd is long quota && CurrentUsageNanoUsd >= quota;
+        Volatile.Read(ref _quotaNanoUsd) is >= 0 and var quota && CurrentUsageNanoUsd >= quota;
+
+    public void UpdateQuota(long? quotaNanoUsd)
+    {
+        if (quotaNanoUsd < 0)
+            throw new ArgumentOutOfRangeException(nameof(quotaNanoUsd));
+        Volatile.Write(ref _quotaNanoUsd, quotaNanoUsd ?? -1);
+    }
 
     public void Add(long costNanoUsd)
     {
@@ -53,4 +67,3 @@ public sealed class DailyQuotaCounter
 
     private static long UtcDayNumber() => DateTime.UtcNow.Ticks / TimeSpan.TicksPerDay;
 }
-

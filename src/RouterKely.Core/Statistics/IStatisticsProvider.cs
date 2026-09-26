@@ -9,5 +9,7 @@ public interface IStatisticsProvider
     ValueTask<StatisticsSnapshot> QueryAsync(
         DateOnly startDate,
         DateOnly endDate,
+        long? userId,
+        long? keyId,
         CancellationToken cancellationToken);
 }

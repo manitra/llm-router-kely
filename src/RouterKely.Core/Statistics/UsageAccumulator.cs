@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+using RouterKely.Core.Identity;
 using RouterKely.Core.Routing;
 
 namespace RouterKely.Core.Statistics;
@@ -5,21 +7,99 @@ namespace RouterKely.Core.Statistics;
 public sealed class UsageAccumulator
 {
     private static readonly int OutcomeCount = Enum.GetValues<UsageOutcome>().Length;
+    private readonly object _gate = new();
+    private readonly ModelRoute[] _routes;
+    private readonly Dictionary<long, DailyQuotaCounter> _quotas = [];
+    private readonly Dictionary<long, UsageAccount> _allAccounts = [];
+    private FrozenDictionary<long, UsageAccount> _activeAccounts = FrozenDictionary<long, UsageAccount>.Empty;
+    private UsageAccount[] _accountSnapshot = [];
 
+    public UsageAccumulator(ModelRoute[] routes, IdentitySnapshot identities)
+    {
+        _routes = routes;
+        UpdateIdentities(identities);
+    }
+
+    public bool TryGetAccount(long keyId, out UsageAccount? account) =>
+        Volatile.Read(ref _activeAccounts).TryGetValue(keyId, out account);
+
+    public void UpdateIdentities(IdentitySnapshot identities)
+    {
+        lock (_gate)
+        {
+            foreach (IdentityUser user in identities.Users)
+            {
+                if (!_quotas.TryGetValue(user.Id, out DailyQuotaCounter? quota))
+                {
+                    quota = new DailyQuotaCounter(user.QuotaNanoUsd);
+                    _quotas.Add(user.Id, quota);
+                }
+                else
+                {
+                    quota.UpdateQuota(user.QuotaNanoUsd);
+                }
+            }
+
+            var users = identities.Users.ToDictionary(user => user.Id);
+            var active = new Dictionary<long, UsageAccount>();
+            foreach (IdentityKey key in identities.Keys)
+            {
+                if (!users.TryGetValue(key.UserId, out IdentityUser? user))
+                    continue;
+                if (!_allAccounts.TryGetValue(key.Id, out UsageAccount? account))
+                {
+                    account = new UsageAccount(
+                        user.Id,
+                        key.Id,
+                        _quotas[user.Id],
+                        _routes.Length,
+                        OutcomeCount);
+                    _allAccounts.Add(key.Id, account);
+                }
+
+                if (user.Enabled && key.Enabled)
+                    active.Add(key.Id, account);
+            }
+
+            Volatile.Write(ref _accountSnapshot, _allAccounts.Values.ToArray());
+            Volatile.Write(ref _activeAccounts, active.ToFrozenDictionary());
+        }
+    }
+
+    public UsageBatch ExchangePending(DateTimeOffset now)
+    {
+        UsageAccount[] accounts = Volatile.Read(ref _accountSnapshot);
+        var entries = new List<UsageAggregate>(accounts.Length * _routes.Length);
+        DateTimeOffset hour = new(now.UtcDateTime.Date.AddHours(now.Hour), TimeSpan.Zero);
+
+        foreach (UsageAccount account in accounts)
+            account.Exchange(hour, _routes, OutcomeCount, entries);
+
+        return new UsageBatch(entries.ToArray());
+    }
+}
+
+public sealed class UsageAccount
+{
     private readonly long _userId;
     private readonly long _keyId;
-    private readonly ModelRoute[] _routes;
+    private readonly int _outcomeCount;
     private readonly UsageCounters[] _counters;
 
-    public UsageAccumulator(long userId, long keyId, ModelRoute[] routes, long? dailyQuotaNanoUsd)
+    internal UsageAccount(
+        long userId,
+        long keyId,
+        DailyQuotaCounter quota,
+        int routeCount,
+        int outcomeCount)
     {
         _userId = userId;
         _keyId = keyId;
-        _routes = routes;
-        _counters = Enumerable.Range(0, routes.Length * OutcomeCount)
+        _outcomeCount = outcomeCount;
+        Quota = quota;
+        _counters = Enumerable.Range(0, routeCount * outcomeCount)
             .Select(static _ => new UsageCounters())
             .ToArray();
-        Quota = new DailyQuotaCounter(dailyQuotaNanoUsd);
     }
 
     public DailyQuotaCounter Quota { get; }
@@ -32,20 +112,21 @@ public sealed class UsageAccumulator
         long durationMilliseconds)
     {
         Quota.Add(costNanoUsd);
-        int index = checked((route.StatisticsIndex * OutcomeCount) + (int)outcome);
+        int index = checked((route.StatisticsIndex * _outcomeCount) + (int)outcome);
         _counters[index].Add(usage, costNanoUsd, durationMilliseconds);
     }
 
-    public UsageBatch ExchangePending(DateTimeOffset now)
+    internal void Exchange(
+        DateTimeOffset hour,
+        ModelRoute[] routes,
+        int outcomeCount,
+        List<UsageAggregate> entries)
     {
-        var entries = new List<UsageAggregate>(_counters.Length);
-        DateTimeOffset hour = new(now.UtcDateTime.Date.AddHours(now.Hour), TimeSpan.Zero);
-
-        for (int routeIndex = 0; routeIndex < _routes.Length; routeIndex++)
+        for (int routeIndex = 0; routeIndex < routes.Length; routeIndex++)
         {
-            for (int outcomeIndex = 0; outcomeIndex < OutcomeCount; outcomeIndex++)
+            for (int outcomeIndex = 0; outcomeIndex < outcomeCount; outcomeIndex++)
             {
-                UsageCounters.Snapshot snapshot = _counters[(routeIndex * OutcomeCount) + outcomeIndex].Exchange();
+                UsageCounters.Snapshot snapshot = _counters[(routeIndex * outcomeCount) + outcomeIndex].Exchange();
                 if (snapshot.RequestCount == 0)
                     continue;
 
@@ -53,7 +134,7 @@ public sealed class UsageAccumulator
                     hour,
                     _userId,
                     _keyId,
-                    _routes[routeIndex].Alias,
+                    routes[routeIndex].Alias,
                     (UsageOutcome)outcomeIndex,
                     snapshot.RequestCount,
                     snapshot.InputTokens,
@@ -64,8 +145,6 @@ public sealed class UsageAccumulator
                     snapshot.UsageMissingCount));
             }
         }
-
-        return new UsageBatch(entries.ToArray());
     }
 
     private sealed class UsageCounters

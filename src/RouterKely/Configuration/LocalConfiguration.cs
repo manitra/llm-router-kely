@@ -18,6 +18,7 @@ public sealed class LocalConfiguration
             LocalConfigurationJsonContext.Default.LocalConfiguration)
             ?? throw new InvalidOperationException("Configuration is empty.");
 
+        configuration.RouterKely.ResolvePaths(Path.GetDirectoryName(Path.GetFullPath(path))!);
         configuration.RouterKely.ApplyEnvironmentOverrides();
         configuration.RouterKely.Validate();
         return configuration;
@@ -32,6 +33,8 @@ public sealed class RouterConfiguration
 
     public UpstreamConfiguration Upstream { get; init; } = new();
 
+    public IdentityConfiguration Identity { get; set; } = new();
+
     public ModelConfiguration[] Models { get; init; } = [];
 
     public long? DailyQuotaNanoUsd { get; init; }
@@ -44,10 +47,18 @@ public sealed class RouterConfiguration
 
     internal void ApplyEnvironmentOverrides()
     {
+        Identity ??= new IdentityConfiguration();
         Statistics ??= new StatisticsConfiguration();
         ListenUrl = Environment.GetEnvironmentVariable("ROUTERKELY_LISTEN_URL") ?? ListenUrl;
         ClientApiKey = Environment.GetEnvironmentVariable("ROUTERKELY_ADMIN_API_KEY") ?? ClientApiKey;
         Upstream.ApiKey = Environment.GetEnvironmentVariable("ROUTERKELY_DEEPSEEK_API_KEY") ?? Upstream.ApiKey;
+    }
+
+    internal void ResolvePaths(string configurationDirectory)
+    {
+        Identity ??= new IdentityConfiguration();
+        if (!Path.IsPathRooted(Identity.FilePath))
+            Identity.FilePath = Path.Combine(configurationDirectory, Identity.FilePath);
     }
 
     internal void Validate()
@@ -76,11 +87,41 @@ public sealed class RouterConfiguration
             throw new InvalidOperationException("Model aliases must be unique.");
         if (DailyQuotaNanoUsd < 0)
             throw new InvalidOperationException("DailyQuotaNanoUsd cannot be negative.");
+        Identity.Validate();
         if (MaxModelPrefixBytes is < 1 or > 1_048_576)
             throw new InvalidOperationException("MaxModelPrefixBytes must be between 1 and 1048576.");
         if (MaxRequestBodyBytes < MaxModelPrefixBytes)
             throw new InvalidOperationException("MaxRequestBodyBytes must be greater than or equal to MaxModelPrefixBytes.");
         Statistics.Validate();
+    }
+}
+
+public sealed class IdentityConfiguration
+{
+    public string FilePath { get; set; } = "router-kely.identities.json";
+
+    public int MaxUsers { get; init; } = 256;
+
+    public int MaxKeys { get; init; } = 1_024;
+
+    public long EnvironmentAdminUserId { get; init; } = 1;
+
+    public long EnvironmentAdminKeyId { get; init; } = 1;
+
+    public string EnvironmentAdminName { get; init; } = "Local Administrator";
+
+    public string EnvironmentAdminEmail { get; init; } = "admin@localhost";
+
+    internal void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(FilePath))
+            throw new InvalidOperationException("Identity.FilePath is required.");
+        if (MaxUsers is < 1 or > 10_000 || MaxKeys is < 1 or > 100_000)
+            throw new InvalidOperationException("Identity limits are invalid.");
+        if (EnvironmentAdminUserId <= 0 || EnvironmentAdminKeyId <= 0 ||
+            string.IsNullOrWhiteSpace(EnvironmentAdminName) ||
+            string.IsNullOrWhiteSpace(EnvironmentAdminEmail))
+            throw new InvalidOperationException("Environment administrator metadata is invalid.");
     }
 }
 

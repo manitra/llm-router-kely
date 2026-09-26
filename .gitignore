@@ -3,3 +3,4 @@
 TestResults/
 scripts/.tmp*
 config/router-kely.local.json
+config/router-kely.identities.json

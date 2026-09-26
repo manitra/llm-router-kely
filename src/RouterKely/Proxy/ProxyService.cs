@@ -40,14 +40,26 @@ public sealed class ProxyService
         _maxModelPrefixBytes = maxModelPrefixBytes;
     }
 
-    public bool Authenticate(HttpContext context) =>
-        context.Request.Headers.TryGetValue("Authorization", out var authorization) &&
-        authorization.Count == 1 &&
-        _authenticator.Authenticate(authorization[0].AsSpan());
+    private bool TryAuthenticate(
+        HttpContext context,
+        out IdentityPrincipal? principal,
+        out UsageAccount? account)
+    {
+        if (context.Request.Headers.TryGetValue("Authorization", out var authorization) &&
+            authorization.Count == 1 &&
+            _authenticator.TryAuthenticate(authorization[0].AsSpan(), out principal) &&
+            principal is not null &&
+            _usage.TryGetAccount(principal.Key.Id, out account))
+            return true;
+
+        principal = null;
+        account = null;
+        return false;
+    }
 
     public async Task WriteModelsAsync(HttpContext context)
     {
-        if (!Authenticate(context))
+        if (!TryAuthenticate(context, out _, out _))
         {
             await WriteErrorAsync(context, 401, "invalid_api_key", "Invalid API key.");
             return;
@@ -74,13 +86,13 @@ public sealed class ProxyService
 
     public async Task ProxyChatCompletionsAsync(HttpContext context)
     {
-        if (!Authenticate(context))
+        if (!TryAuthenticate(context, out _, out UsageAccount? account) || account is null)
         {
             await WriteErrorAsync(context, 401, "invalid_api_key", "Invalid API key.");
             return;
         }
 
-        if (_usage.Quota.IsExceeded)
+        if (account.Quota.IsExceeded)
         {
             await WriteErrorAsync(context, 429, "quota_exceeded", "Daily quota exceeded.");
             return;
@@ -146,7 +158,7 @@ public sealed class ProxyService
                     : upstream.StatusCode >= HttpStatusCode.InternalServerError
                         ? UsageOutcome.UpstreamError
                         : UsageOutcome.ClientError;
-                _usage.Record(
+                account.Record(
                     route,
                     outcome,
                     accounted,
@@ -155,16 +167,16 @@ public sealed class ProxyService
             }
             catch (RequestBodyTooLargeException) when (!context.Response.HasStarted)
             {
-                _usage.Record(route, UsageOutcome.ClientError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
+                account.Record(route, UsageOutcome.ClientError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
                 await WriteErrorAsync(context, 413, "request_too_large", "Request body is too large.");
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
-                _usage.Record(route, UsageOutcome.Cancelled, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
+                account.Record(route, UsageOutcome.Cancelled, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
             }
             catch (HttpRequestException) when (!context.Response.HasStarted)
             {
-                _usage.Record(route, UsageOutcome.UpstreamError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
+                account.Record(route, UsageOutcome.UpstreamError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
                 await WriteErrorAsync(context, 502, "upstream_error", "Unable to reach the upstream API.");
             }
         }

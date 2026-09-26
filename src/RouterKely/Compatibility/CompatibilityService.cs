@@ -14,25 +14,22 @@ public sealed class CompatibilityService
     private readonly ModelRoute[] _routes;
     private readonly UsageAccumulator _usage;
     private readonly IStatisticsProvider _statistics;
-    private readonly CompatibilityIdentity _identity;
 
     public CompatibilityService(
         ApiKeyAuthenticator authenticator,
         ModelRoute[] routes,
         UsageAccumulator usage,
-        IStatisticsProvider statistics,
-        CompatibilityIdentity identity)
+        IStatisticsProvider statistics)
     {
         _authenticator = authenticator;
         _routes = routes;
         _usage = usage;
         _statistics = statistics;
-        _identity = identity;
     }
 
     public async Task WriteModelInfoAsync(HttpContext context)
     {
-        if (!await AuthenticateAsync(context))
+        if ((await AuthenticateAsync(context)).Principal is null)
             return;
 
         context.Response.ContentType = "application/json";
@@ -85,24 +82,26 @@ public sealed class CompatibilityService
 
     public async Task WriteKeyInfoAsync(HttpContext context)
     {
-        if (!await AuthenticateAsync(context))
+        AuthenticationContext authentication = await AuthenticateAsync(context);
+        if (authentication.Principal is null || authentication.Account is null)
             return;
 
-        long usageNanoUsd = _usage.Quota.CurrentUsageNanoUsd;
-        long? quotaNanoUsd = _usage.Quota.QuotaNanoUsd;
+        IdentityPrincipal principal = authentication.Principal;
+        long usageNanoUsd = authentication.Account.Quota.CurrentUsageNanoUsd;
+        long? quotaNanoUsd = authentication.Account.Quota.QuotaNanoUsd;
         DateTime resetAt = DateTime.UtcNow.Date.AddDays(1);
 
         context.Response.ContentType = "application/json";
         await using var writer = new Utf8JsonWriter(context.Response.BodyWriter);
         writer.WriteStartObject();
-        writer.WriteString("key", _identity.MaskedKey);
+        writer.WriteString("key", principal.Key.Masked);
         writer.WriteStartObject("info");
-        writer.WriteString("token", _identity.MaskedKey);
-        writer.WriteNumber("key_id", _identity.KeyId);
-        writer.WriteString("key_name", _identity.KeyName);
-        writer.WriteString("key_alias", _identity.MaskedKey);
-        writer.WriteNumber("user_id", _identity.UserId);
-        writer.WriteString("user_email", _identity.UserEmail);
+        writer.WriteString("token", principal.Key.Masked);
+        writer.WriteNumber("key_id", principal.Key.Id);
+        writer.WriteString("key_name", principal.Key.Name);
+        writer.WriteString("key_alias", principal.Key.Masked);
+        writer.WriteNumber("user_id", principal.User.Id);
+        writer.WriteString("user_email", principal.User.Email);
         writer.WriteStartArray("models");
         foreach (ModelRoute route in _routes)
             writer.WriteStringValue(route.Alias);
@@ -125,7 +124,8 @@ public sealed class CompatibilityService
 
     public async Task WriteDailyActivityAsync(HttpContext context)
     {
-        if (!await AuthenticateAsync(context))
+        AuthenticationContext authentication = await AuthenticateAsync(context);
+        if (authentication.Principal is null)
             return;
 
         DateOnly today = DateOnly.FromDateTime(DateTime.UtcNow);
@@ -140,6 +140,8 @@ public sealed class CompatibilityService
         StatisticsSnapshot snapshot = await _statistics.QueryAsync(
             startDate,
             endDate,
+            authentication.Principal.User.Id,
+            authentication.Principal.Key.Id,
             context.RequestAborted);
 
         context.Response.ContentType = "application/json";
@@ -147,7 +149,7 @@ public sealed class CompatibilityService
         writer.WriteStartObject();
         writer.WriteStartArray("results");
         foreach (DailyUsage day in snapshot.Days)
-            WriteDay(writer, day);
+            WriteDay(writer, day, authentication.Principal.Key.Masked);
         writer.WriteEndArray();
         writer.WriteStartObject("metadata");
         writer.WriteNumber("total_spend", NanoUsdToUsd(snapshot.Days.Sum(day => day.CostNanoUsd)));
@@ -160,7 +162,7 @@ public sealed class CompatibilityService
         await writer.FlushAsync(context.RequestAborted);
     }
 
-    private void WriteDay(Utf8JsonWriter writer, DailyUsage day)
+    private static void WriteDay(Utf8JsonWriter writer, DailyUsage day, string maskedKey)
     {
         writer.WriteStartObject();
         writer.WriteString("date", day.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
@@ -184,7 +186,7 @@ public sealed class CompatibilityService
         writer.WriteEndObject();
         writer.WriteEndObject();
         writer.WriteStartObject("api_keys");
-        writer.WriteStartObject(_identity.MaskedKey);
+            writer.WriteStartObject(maskedKey);
         WriteMetrics(writer, day.RequestCount, day.InputTokens, day.OutputTokens, day.CostNanoUsd);
         writer.WriteEndObject();
         writer.WriteEndObject();
@@ -206,17 +208,21 @@ public sealed class CompatibilityService
         writer.WriteNumber("api_requests", requests);
     }
 
-    private async ValueTask<bool> AuthenticateAsync(HttpContext context)
+    private async ValueTask<AuthenticationContext> AuthenticateAsync(HttpContext context)
     {
+        IdentityPrincipal? principal = null;
+        UsageAccount? account = null;
         bool authenticated =
             context.Request.Headers.TryGetValue("Authorization", out var authorization) &&
             authorization.Count == 1 &&
-            _authenticator.Authenticate(authorization[0].AsSpan());
+            _authenticator.TryAuthenticate(authorization[0].AsSpan(), out principal) &&
+            principal is not null &&
+            _usage.TryGetAccount(principal.Key.Id, out account);
         if (authenticated)
-            return true;
+            return new AuthenticationContext(principal, account);
 
         await WriteErrorAsync(context, 401, "invalid_api_key", "Invalid API key.");
-        return false;
+        return default;
     }
 
     private static bool TryReadDate(
@@ -275,4 +281,8 @@ public sealed class CompatibilityService
             $"{{\"error\":{{\"message\":\"{message}\",\"type\":\"router_kely_error\",\"param\":null,\"code\":\"{code}\"}}}}",
             context.RequestAborted);
     }
+
+    private readonly record struct AuthenticationContext(
+        IdentityPrincipal? Principal,
+        UsageAccount? Account);
 }

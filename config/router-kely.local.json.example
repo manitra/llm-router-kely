@@ -2,6 +2,15 @@
   "routerKely": {
     "listenUrl": "http://127.0.0.1:8080",
     "clientApiKey": "sk-rk-local-change-me",
+    "identity": {
+      "filePath": "router-kely.identities.json",
+      "maxUsers": 256,
+      "maxKeys": 1024,
+      "environmentAdminUserId": 1,
+      "environmentAdminKeyId": 1,
+      "environmentAdminName": "Local Administrator",
+      "environmentAdminEmail": "admin@localhost"
+    },
     "upstream": {
       "baseUrl": "https://api.deepseek.com/v1/",
       "apiKey": "replace-with-your-deepseek-api-key"

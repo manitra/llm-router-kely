@@ -108,6 +108,9 @@ try
     Console.WriteLine($"  throughput: {requestsPerSecond:N0} sequential routed requests/s");
     Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
 
+    await RunAdminUiSmokeAsync(routerUrl);
+    Console.WriteLine("  admin UI:   PASS (login, create user/key, authenticate, revoke)");
+
     if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))
         return 1;
 }
@@ -238,6 +241,124 @@ static HttpClient CreateClient()
         UseProxy = false
     };
     return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+}
+
+static async Task RunAdminUiSmokeAsync(string routerUrl)
+{
+    var handler = new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseCookies = true,
+        CookieContainer = new CookieContainer(),
+        UseProxy = false
+    };
+    using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+    string origin = routerUrl;
+
+    using (HttpResponseMessage page = await client.GetAsync($"{routerUrl}/ui/login"))
+        EnsureStatus(page, HttpStatusCode.OK, "login page");
+
+    using (var login = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/login"))
+    {
+        login.Headers.Add("Origin", origin);
+        login.Content = new FormUrlEncodedContent(new Dictionary<string, string> { ["key"] = ApiKey });
+        using HttpResponseMessage response = await client.SendAsync(login);
+        EnsureStatus(response, HttpStatusCode.Redirect, "login");
+    }
+
+    string usersHtml;
+    using (HttpResponseMessage users = await client.GetAsync($"{routerUrl}/ui/admin/users"))
+    {
+        EnsureStatus(users, HttpStatusCode.OK, "users page");
+        usersHtml = await users.Content.ReadAsStringAsync();
+    }
+
+    string usersCsrf = ExtractBetween(usersHtml, "name=\"csrf\" value=\"", "\"");
+    using (var createUser = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/users/create"))
+    {
+        createUser.Headers.Add("Origin", origin);
+        createUser.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["csrf"] = usersCsrf,
+            ["name"] = "Performance User",
+            ["email"] = "performance@example.com",
+            ["quotaUsd"] = "1"
+        });
+        using HttpResponseMessage response = await client.SendAsync(createUser);
+        EnsureStatus(response, HttpStatusCode.Redirect, "create user");
+    }
+
+    string userHtml;
+    using (HttpResponseMessage user = await client.GetAsync($"{routerUrl}/ui/admin/users/2"))
+    {
+        EnsureStatus(user, HttpStatusCode.OK, "user page");
+        userHtml = await user.Content.ReadAsStringAsync();
+    }
+
+    string userCsrf = ExtractBetween(userHtml, "name=\"csrf\" value=\"", "\"");
+    string keyHtml;
+    using (var createKey = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/users/2/keys/create"))
+    {
+        createKey.Headers.Add("Origin", origin);
+        createKey.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["csrf"] = userCsrf,
+            ["name"] = "Performance key"
+        });
+        using HttpResponseMessage response = await client.SendAsync(createKey);
+        EnsureStatus(response, HttpStatusCode.OK, "create key");
+        keyHtml = await response.Content.ReadAsStringAsync();
+    }
+
+    string plaintextKey = WebUtility.HtmlDecode(ExtractBetween(keyHtml, "<pre>", "</pre>"));
+    using (var models = new HttpRequestMessage(HttpMethod.Get, $"{routerUrl}/v1/models"))
+    {
+        models.Headers.Authorization = new AuthenticationHeaderValue("Bearer", plaintextKey);
+        using HttpResponseMessage response = await client.SendAsync(models);
+        EnsureStatus(response, HttpStatusCode.OK, "generated key authentication");
+    }
+
+    using (HttpResponseMessage user = await client.GetAsync($"{routerUrl}/ui/admin/users/2"))
+    {
+        EnsureStatus(user, HttpStatusCode.OK, "updated user page");
+        userHtml = await user.Content.ReadAsStringAsync();
+    }
+    userCsrf = ExtractBetween(userHtml, "name=\"csrf\" value=\"", "\"");
+    string keyId = ExtractBetween(userHtml, "action=\"/ui/actions/keys/", "/revoke\"");
+    string revokePath = $"/ui/actions/keys/{keyId}/revoke";
+    using (var revoke = new HttpRequestMessage(HttpMethod.Post, routerUrl + revokePath))
+    {
+        revoke.Headers.Add("Origin", origin);
+        revoke.Content = new FormUrlEncodedContent(new Dictionary<string, string> { ["csrf"] = userCsrf });
+        using HttpResponseMessage response = await client.SendAsync(revoke);
+        EnsureStatus(response, HttpStatusCode.Redirect, "revoke key");
+    }
+
+    using (var models = new HttpRequestMessage(HttpMethod.Get, $"{routerUrl}/v1/models"))
+    {
+        models.Headers.Authorization = new AuthenticationHeaderValue("Bearer", plaintextKey);
+        using HttpResponseMessage response = await client.SendAsync(models);
+        EnsureStatus(response, HttpStatusCode.Unauthorized, "revoked key authentication");
+    }
+}
+
+static void EnsureStatus(HttpResponseMessage response, HttpStatusCode expected, string operation)
+{
+    if (response.StatusCode != expected)
+        throw new InvalidOperationException(
+            $"Admin UI smoke failed during {operation}: expected {(int)expected}, received {(int)response.StatusCode}.");
+}
+
+static string ExtractBetween(string value, string start, string end)
+{
+    int startIndex = value.IndexOf(start, StringComparison.Ordinal);
+    if (startIndex < 0)
+        throw new InvalidOperationException($"Admin UI smoke could not find '{start}'.");
+    startIndex += start.Length;
+    int endIndex = value.IndexOf(end, startIndex, StringComparison.Ordinal);
+    if (endIndex < 0)
+        throw new InvalidOperationException($"Admin UI smoke could not find '{end}'.");
+    return value[startIndex..endIndex];
 }
 
 static async Task WaitUntilReadyAsync(HttpClient client, Uri endpoint, Process router)

@@ -443,6 +443,8 @@ All browser UI routes live under `/ui`:
 
 The look and route placement SHOULD feel familiar to LiteLLM users, but pixel/API parity is not a goal. The UI must work without JavaScript for primary operations. Small progressive-enhancement JavaScript embedded in the executable is allowed.
 
+The initial administration UI is intentionally one server-rendered users table plus one user-detail page. “Remove user” means disable the user; “remove key” means revoke the key. Neither operation physically deletes identity history. The user-detail page generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
+
 ### 10.2 Browser session
 
 `POST /ui/login` accepts a Router Kely key over TLS, authenticates it using the normal in-memory lookup, and creates a 256-bit opaque random session ID. The session is stored only in a bounded in-memory table and sent in a cookie:
@@ -460,6 +462,8 @@ HttpOnly; Secure; SameSite=Strict; Path=/ui
 - Login is rate-limited by source IP and globally; failures have a small fixed delay on the cold path.
 
 The login form MUST warn users that the key is submitted only to create the session and is not stored. Browser local/session storage MUST NOT contain the key.
+
+The `Secure` cookie flag is mandatory under HTTPS. The loopback-only HTTP development listener may omit it so the local administration UI remains usable; non-loopback deployments require TLS.
 
 ### 10.3 Bootstrap
 

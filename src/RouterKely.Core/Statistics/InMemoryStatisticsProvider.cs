@@ -20,7 +20,7 @@ public sealed class InMemoryStatisticsProvider : IStatisticsProvider
     }
 
     public ValueTask<StatisticsSnapshot> RestoreAsync(CancellationToken cancellationToken) =>
-        QueryAsync(DateOnly.MinValue, DateOnly.MaxValue, cancellationToken);
+        QueryAsync(DateOnly.MinValue, DateOnly.MaxValue, null, null, cancellationToken);
 
     public ValueTask WriteAsync(UsageBatch batch, CancellationToken cancellationToken)
     {
@@ -42,13 +42,18 @@ public sealed class InMemoryStatisticsProvider : IStatisticsProvider
     public ValueTask<StatisticsSnapshot> QueryAsync(
         DateOnly startDate,
         DateOnly endDate,
+        long? userId,
+        long? keyId,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
             DailyUsage[] days = _daily
-                .Where(pair => pair.Key.Date >= startDate && pair.Key.Date <= endDate)
+                .Where(pair =>
+                    pair.Key.Date >= startDate && pair.Key.Date <= endDate &&
+                    (userId is null || pair.Key.UserId == userId) &&
+                    (keyId is null || pair.Key.KeyId == keyId))
                 .GroupBy(pair => pair.Key.Date)
                 .OrderBy(group => group.Key)
                 .Select(group =>
