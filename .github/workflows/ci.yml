@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Full test and performance suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run all tests
+        shell: bash
+        run: |
+          set -o pipefail
+          ./scripts/tests.sh | tee scripts/.tmp-ci-output.log
+
+      - name: Build performance badges
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          log="scripts/.tmp-ci-output.log"
+          output="scripts/.tmp-ci-pages/badges"
+          mkdir -p "$output"
+
+          p50="$(sed -nE 's/.*overhead:[[:space:]]+p50 ([0-9.]+) ms.*/\1/p' "$log" | tail -1)"
+          allocation="$(sed -nE 's/.*allocation:[[:space:]]+([0-9,]+) B\/routed request.*/\1/p' "$log" | tr -d ',' | tail -1)"
+          binary="$(sed -nE 's/.*binary:[[:space:]]+([0-9.]+) MiB.*/\1/p' "$log" | tail -1)"
+
+          if [[ -z "$p50" || -z "$allocation" || -z "$binary" ]]; then
+            echo "Could not extract every performance metric from the test output." >&2
+            exit 1
+          fi
+
+          p50_color="$(awk -v x="$p50" 'BEGIN { print (x < 0.25 ? "brightgreen" : x < 0.5 ? "yellow" : "red") }')"
+          allocation_color="$(awk -v x="$allocation" 'BEGIN { print (x <= 8192 ? "brightgreen" : x <= 10240 ? "yellow" : "red") }')"
+          binary_color="$(awk -v x="$binary" 'BEGIN { print (x <= 20 ? "brightgreen" : x <= 22 ? "yellow" : "red") }')"
+
+          printf '{"schemaVersion":1,"label":"p50 overhead","message":"%s ms","color":"%s"}\n' "$p50" "$p50_color" > "$output/p50.json"
+          printf '{"schemaVersion":1,"label":"alloc / request","message":"%s B","color":"%s"}\n' "$allocation" "$allocation_color" > "$output/allocation.json"
+          printf '{"schemaVersion":1,"label":"binary size","message":"%s MiB","color":"%s"}\n' "$binary" "$binary_color" > "$output/binary.json"
+
+          {
+            echo "## Router Kely performance"
+            echo
+            echo "| Metric | Measured | Budget |"
+            echo "|---|---:|---:|"
+            echo "| p50 gateway overhead | ${p50} ms | < 0.250 ms |"
+            echo "| Allocated bytes per routed request | ${allocation} B | <= 8,192 B |"
+            echo "| Native AOT binary size | ${binary} MiB | <= 20 MiB |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload performance badge data
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-badges
+          path: scripts/.tmp-ci-pages
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-output-${{ github.run_attempt }}
+          path: scripts/.tmp-ci-output.log
+          if-no-files-found: ignore
+          retention-days: 7
