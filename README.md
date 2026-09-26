@@ -15,8 +15,14 @@
 ```
 
 **OpenAI-compatible LLM routing with sub-millisecond latency and a tiny memory footprint.**
+`Kely` means "small" in Malagasy and expresses its tiny, locally rooted design.
 
-LLM Router Kely is a deliberately small .NET 10 Native AOT gateway for inference against DeepSeek. `LLM` makes its purpose easy to discover, while `Kely`—Malagasy for “small”—expresses its tiny, locally rooted design.
+Tired of provisioning multi-gigabyte instances for your LiteLLM gateway? Welcome home.
+- 7.1 KiB allocated per routed request in our latest benchmark
+- 274 µs p99 incremental proxy overhead against a same-host mock upstream
+- 29.8 MiB idle working set after load
+- Designed to handle 256 concurrent streams within a 250 MiB memory limit
+You can downsize your VPS.
 
 ## Install
 
