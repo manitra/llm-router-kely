@@ -1,2 +1,340 @@
-Console.WriteLine("Router Kely performance harness scaffold");
+using System.Diagnostics;
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
 
+const string ApiKey = "sk-rk-performance-test";
+const int ResponseBytes = 1_024;
+const int DefaultWarmup = 100;
+const int DefaultSamples = 1_000;
+
+CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
+
+string repositoryRoot = args.Length == 1
+    ? Path.GetFullPath(args[0])
+    : FindRepositoryRoot();
+string routerAssembly = Path.Combine(
+    repositoryRoot,
+    "src",
+    "RouterKely",
+    "bin",
+    "Release",
+    "net10.0",
+    "RouterKely.dll");
+if (!File.Exists(routerAssembly))
+    throw new InvalidOperationException($"Build RouterKely first. Missing '{routerAssembly}'.");
+
+int warmup = ReadPositiveInteger("ROUTERKELY_PERF_WARMUP", DefaultWarmup);
+int samples = ReadPositiveInteger("ROUTERKELY_PERF_SAMPLES", DefaultSamples);
+bool enforce = string.Equals(
+    Environment.GetEnvironmentVariable("ROUTERKELY_PERF_ENFORCE"),
+    "true",
+    StringComparison.OrdinalIgnoreCase);
+
+int mockPort = ReserveLoopbackPort();
+int routerPort;
+do
+{
+    routerPort = ReserveLoopbackPort();
+}
+while (routerPort == mockPort);
+string mockUrl = $"http://127.0.0.1:{mockPort}";
+string routerUrl = $"http://127.0.0.1:{routerPort}";
+string temporaryDirectory = Path.Combine(
+    repositoryRoot,
+    "scripts",
+    $".tmp-performance-{Environment.ProcessId}");
+Directory.CreateDirectory(temporaryDirectory);
+
+WebApplication? mock = null;
+Process? router = null;
+try
+{
+    mock = await StartMockUpstreamAsync(mockUrl);
+    string configurationPath = WriteConfiguration(temporaryDirectory, routerUrl, mockUrl);
+    router = StartRouter(routerAssembly, configurationPath);
+
+    using var directClient = CreateClient();
+    using var routerClient = CreateClient();
+    var directEndpoint = new Uri($"{mockUrl}/v1/chat/completions");
+    var routerEndpoint = new Uri($"{routerUrl}/v1/chat/completions");
+    byte[] directRequest = "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"u8.ToArray();
+    byte[] routerRequest = "{\"model\":\"perf\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"u8.ToArray();
+
+    await WaitUntilReadyAsync(routerClient, new Uri($"{routerUrl}/health/ready"), router);
+
+    for (int index = 0; index < warmup; index++)
+    {
+        await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
+        await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
+    }
+
+    var directMilliseconds = new double[samples];
+    var routerMilliseconds = new double[samples];
+    for (int index = 0; index < samples; index++)
+    {
+        if ((index & 1) == 0)
+        {
+            directMilliseconds[index] = await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
+            routerMilliseconds[index] = await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
+        }
+        else
+        {
+            routerMilliseconds[index] = await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
+            directMilliseconds[index] = await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
+        }
+    }
+
+    Metrics direct = Metrics.Calculate(directMilliseconds);
+    Metrics routed = Metrics.Calculate(routerMilliseconds);
+    double overheadP50 = Math.Max(0, routed.P50 - direct.P50);
+    double overheadP95 = Math.Max(0, routed.P95 - direct.P95);
+    double overheadP99 = Math.Max(0, routed.P99 - direct.P99);
+    double requestsPerSecond = samples / (routerMilliseconds.Sum() / 1_000d);
+
+    Console.WriteLine();
+    Console.WriteLine("Router Kely end-to-end performance smoke");
+    Console.WriteLine($"  runtime:    {RuntimeInformation.OSDescription}, {RuntimeInformation.ProcessArchitecture}, .NET {Environment.Version}");
+    Console.WriteLine("  build:      Release framework-dependent smoke; Native AOT certification is separate");
+    Console.WriteLine($"  scenario:   {samples:N0} interleaved samples, {warmup:N0} warm-up, {ResponseBytes:N0}-byte response, concurrency 1");
+    Console.WriteLine($"  direct:     p50 {direct.P50:F3} ms | p95 {direct.P95:F3} ms | p99 {direct.P99:F3} ms");
+    Console.WriteLine($"  router:     p50 {routed.P50:F3} ms | p95 {routed.P95:F3} ms | p99 {routed.P99:F3} ms");
+    Console.WriteLine($"  overhead:   p50 {overheadP50:F3} ms | p95 {overheadP95:F3} ms | p99 {overheadP99:F3} ms");
+    Console.WriteLine($"  throughput: {requestsPerSecond:N0} sequential routed requests/s");
+    Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
+
+    if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))
+        return 1;
+}
+finally
+{
+    if (router is not null && !router.HasExited)
+    {
+        router.Kill(entireProcessTree: true);
+        await router.WaitForExitAsync();
+    }
+
+    router?.Dispose();
+    if (mock is not null)
+    {
+        await mock.StopAsync();
+        await mock.DisposeAsync();
+    }
+
+    if (Directory.Exists(temporaryDirectory))
+        Directory.Delete(temporaryDirectory, recursive: true);
+}
+
+return 0;
+
+static async Task<WebApplication> StartMockUpstreamAsync(string url)
+{
+    WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+    builder.Logging.ClearProviders();
+    builder.WebHost.UseUrls(url);
+    WebApplication app = builder.Build();
+    byte[] response = CreateResponseBody();
+
+    app.MapPost("/v1/chat/completions", async context =>
+    {
+        await context.Request.Body.CopyToAsync(Stream.Null, context.RequestAborted);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "application/json";
+        context.Response.ContentLength = response.Length;
+        await context.Response.Body.WriteAsync(response, context.RequestAborted);
+    });
+
+    await app.StartAsync();
+    return app;
+}
+
+static byte[] CreateResponseBody()
+{
+    const string json = "{\"id\":\"perf\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":0}}";
+    byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
+    if (jsonBytes.Length > ResponseBytes)
+        throw new InvalidOperationException("Mock response exceeds its fixed size.");
+
+    byte[] response = new byte[ResponseBytes];
+    jsonBytes.CopyTo(response, 0);
+    response.AsSpan(jsonBytes.Length).Fill((byte)' ');
+    return response;
+}
+
+static string WriteConfiguration(string directory, string routerUrl, string mockUrl)
+{
+    string path = Path.Combine(directory, "router-kely.performance.json");
+    var configuration = new
+    {
+        routerKely = new
+        {
+            listenUrl = routerUrl,
+            clientApiKey = ApiKey,
+            upstream = new
+            {
+                baseUrl = $"{mockUrl}/v1/",
+                apiKey = "mock-upstream-key",
+                allowInsecureLoopback = true
+            },
+            models = new[]
+            {
+                new
+                {
+                    alias = "perf",
+                    upstreamModel = "deepseek-chat",
+                    inputNanoUsdPerMillion = 1_000_000_000L,
+                    cachedInputNanoUsdPerMillion = 100_000_000L,
+                    outputNanoUsdPerMillion = 2_000_000_000L
+                }
+            },
+            dailyQuotaNanoUsd = (long?)null,
+            statistics = new
+            {
+                flushIntervalMilliseconds = 1_000,
+                hourlyRetentionHours = 72,
+                dailyRetentionDays = 7
+            },
+            maxRequestBodyBytes = 33_554_432,
+            maxModelPrefixBytes = 65_536
+        }
+    };
+
+    File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(configuration));
+    return path;
+}
+
+static Process StartRouter(string assembly, string configurationPath)
+{
+    var start = new ProcessStartInfo("dotnet")
+    {
+        RedirectStandardError = true,
+        RedirectStandardOutput = true,
+        UseShellExecute = false
+    };
+    start.ArgumentList.Add(assembly);
+    start.Environment["ROUTERKELY_CONFIG"] = configurationPath;
+    start.Environment["Logging__LogLevel__Default"] = "Warning";
+
+    Process process = Process.Start(start)
+        ?? throw new InvalidOperationException("Failed to start Router Kely.");
+    process.BeginOutputReadLine();
+    process.BeginErrorReadLine();
+    return process;
+}
+
+static HttpClient CreateClient()
+{
+    var handler = new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        AutomaticDecompression = DecompressionMethods.None,
+        MaxConnectionsPerServer = 1,
+        UseCookies = false,
+        UseProxy = false
+    };
+    return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+}
+
+static async Task WaitUntilReadyAsync(HttpClient client, Uri endpoint, Process router)
+{
+    long deadline = Stopwatch.GetTimestamp() + (10 * Stopwatch.Frequency);
+    while (Stopwatch.GetTimestamp() < deadline)
+    {
+        if (router.HasExited)
+            throw new InvalidOperationException($"Router Kely exited during startup with code {router.ExitCode}.");
+
+        try
+        {
+            using HttpResponseMessage response = await client.GetAsync(endpoint);
+            if (response.IsSuccessStatusCode)
+                return;
+        }
+        catch (HttpRequestException)
+        {
+        }
+
+        await Task.Delay(25);
+    }
+
+    throw new TimeoutException("Router Kely did not become ready within 10 seconds.");
+}
+
+static async Task<double> MeasureAsync(HttpClient client, Uri endpoint, byte[] requestBody, bool authorize)
+{
+    using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+    {
+        Version = HttpVersion.Version11,
+        VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+        Content = new ByteArrayContent(requestBody)
+    };
+    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+    if (authorize)
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
+
+    long started = Stopwatch.GetTimestamp();
+    using HttpResponseMessage response = await client.SendAsync(
+        request,
+        HttpCompletionOption.ResponseHeadersRead);
+    byte[] body = await response.Content.ReadAsByteArrayAsync();
+    double elapsedMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+    if (response.StatusCode != HttpStatusCode.OK || body.Length != ResponseBytes)
+        throw new InvalidOperationException(
+            $"Unexpected response: {(int)response.StatusCode}, {body.Length} bytes.");
+
+    return elapsedMilliseconds;
+}
+
+static int ReserveLoopbackPort()
+{
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    listener.Stop();
+    return port;
+}
+
+static int ReadPositiveInteger(string name, int defaultValue)
+{
+    string? raw = Environment.GetEnvironmentVariable(name);
+    return int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out int value) && value > 0
+        ? value
+        : defaultValue;
+}
+
+static string FindRepositoryRoot()
+{
+    for (DirectoryInfo? directory = new(Directory.GetCurrentDirectory());
+         directory is not null;
+         directory = directory.Parent)
+    {
+        if (File.Exists(Path.Combine(directory.FullName, "RouterKely.slnx")))
+            return directory.FullName;
+    }
+
+    throw new InvalidOperationException("Could not locate RouterKely.slnx.");
+}
+
+readonly record struct Metrics(double P50, double P95, double P99)
+{
+    public static Metrics Calculate(double[] values)
+    {
+        double[] sorted = (double[])values.Clone();
+        Array.Sort(sorted);
+        return new Metrics(
+            Percentile(sorted, 0.50),
+            Percentile(sorted, 0.95),
+            Percentile(sorted, 0.99));
+    }
+
+    private static double Percentile(double[] sorted, double percentile)
+    {
+        int index = Math.Clamp((int)Math.Ceiling(sorted.Length * percentile) - 1, 0, sorted.Length - 1);
+        return sorted[index];
+    }
+}

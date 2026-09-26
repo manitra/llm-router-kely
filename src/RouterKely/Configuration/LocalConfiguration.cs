@@ -56,8 +56,11 @@ public sealed class RouterConfiguration
             throw new InvalidOperationException("RouterKely.ListenUrl must be an absolute URL.");
         if (string.IsNullOrWhiteSpace(ClientApiKey))
             throw new InvalidOperationException("RouterKely.ClientApiKey or ROUTERKELY_ADMIN_API_KEY is required.");
-        if (!Uri.TryCreate(Upstream.BaseUrl, UriKind.Absolute, out Uri? upstream) || upstream.Scheme != Uri.UriSchemeHttps)
-            throw new InvalidOperationException("RouterKely.Upstream.BaseUrl must be an absolute HTTPS URL.");
+        if (!Uri.TryCreate(Upstream.BaseUrl, UriKind.Absolute, out Uri? upstream) ||
+            (upstream.Scheme != Uri.UriSchemeHttps &&
+             !(Upstream.AllowInsecureLoopback && upstream.Scheme == Uri.UriSchemeHttp && upstream.IsLoopback)))
+            throw new InvalidOperationException(
+                "RouterKely.Upstream.BaseUrl must use HTTPS unless insecure loopback is explicitly enabled.");
         if (string.IsNullOrWhiteSpace(Upstream.ApiKey))
             throw new InvalidOperationException("RouterKely.Upstream.ApiKey or ROUTERKELY_DEEPSEEK_API_KEY is required.");
         if (Models.Length == 0)
@@ -86,6 +89,8 @@ public sealed class UpstreamConfiguration
     public string BaseUrl { get; init; } = "https://api.deepseek.com/v1/";
 
     public string ApiKey { get; set; } = string.Empty;
+
+    public bool AllowInsecureLoopback { get; init; }
 }
 
 public sealed class ModelConfiguration

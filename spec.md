@@ -1035,6 +1035,10 @@ CI compares the candidate with the default branch on the same runner. Fail when:
 
 Benchmark noise must be controlled with warm-up, CPU affinity where available, repeated samples, and median-of-runs reporting. Store machine/runtime metadata with results.
 
+The default `scripts/tests.sh` run includes a short, concurrency-1 end-to-end smoke benchmark using a local deterministic upstream and the release build. It reports interleaved direct/upstream and routed p50/p95/p99 latency, incremental p50/p95/p99 overhead, and sequential throughput. Results are informational on ordinary developer machines. Setting `ROUTERKELY_PERF_ENFORCE=true` enforces the p50 and p99 incremental latency limits; this mode is intended for controlled CI runners. `ROUTERKELY_PERF_WARMUP` and `ROUTERKELY_PERF_SAMPLES` may increase sample counts without changing the scenario.
+
+The harness may set `Upstream.AllowInsecureLoopback=true` only for a loopback HTTP mock. The option never permits plaintext traffic to a non-loopback address and defaults to false.
+
 ## 19. Testing strategy
 
 ### 19.1 Unit/property tests
