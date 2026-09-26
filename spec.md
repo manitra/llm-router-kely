@@ -460,6 +460,8 @@ HttpOnly; Secure; SameSite=Strict; Path=/ui
 - Sessions intentionally disappear on process restart and are not shared across replicas.
 - State-changing form posts require an HMAC-backed synchronizer CSRF token and same-origin validation.
 - Login is rate-limited by source IP and globally; failures have a small fixed delay on the cold path.
+- Same-origin validation accepts an exact `Origin` match against the request scheme and host. An opaque `Origin: null` (sandboxed iframe, webview, or header-rewriting client) or a missing `Origin` falls back to a same-origin `Referer`, which is available because every UI page is served with `Referrer-Policy: same-origin`.
+- A rejected same-origin check returns `403` with a distinct message; only the login rate limiter returns `429`. The two outcomes MUST NOT share a status code.
 
 The login form MUST warn users that the key is submitted only to create the session and is not stored. Browser local/session storage MUST NOT contain the key.
 

@@ -5,12 +5,16 @@ using System.Text.Encodings.Web;
 using Microsoft.Extensions.Primitives;
 using RouterKely.Core.Authentication;
 using RouterKely.Core.Identity;
+using RouterKely.Core.Security;
 using RouterKely.Identity;
 
 namespace RouterKely.Ui;
 
 public sealed class AdminUiService
 {
+    private const string CrossOriginMessage = "Request rejected: it did not originate from this site. Open the UI directly and retry.";
+    private const string RateLimitedMessage = "Too many sign-in attempts. Try again later.";
+
     private readonly ApiKeyAuthenticator _authenticator;
     private readonly IdentityAdminService _identities;
     private readonly UiSessionStore _sessions;
@@ -46,10 +50,16 @@ public sealed class AdminUiService
 
     public async Task LoginAsync(HttpContext context)
     {
-        if (!IsSameOrigin(context) || !_loginRateLimiter.TryAcquire(context.Connection.RemoteIpAddress))
+        if (!IsSameOrigin(context))
+        {
+            await WriteStatusAsync(context, StatusCodes.Status403Forbidden, CrossOriginMessage);
+            return;
+        }
+
+        if (!_loginRateLimiter.TryAcquire(context.Connection.RemoteIpAddress))
         {
             await Task.Delay(150, context.RequestAborted);
-            await WriteStatusAsync(context, StatusCodes.Status429TooManyRequests, "Try again later.");
+            await WriteStatusAsync(context, StatusCodes.Status429TooManyRequests, RateLimitedMessage);
             return;
         }
 
@@ -264,8 +274,14 @@ public sealed class AdminUiService
 
     private async ValueTask<PostContext?> RequireAdminPostAsync(HttpContext context)
     {
-        if (!RequireAdmin(context, out UiSession? session, out _) || !IsSameOrigin(context))
+        if (!RequireAdmin(context, out UiSession? session, out _))
             return null;
+
+        if (!IsSameOrigin(context))
+        {
+            await WriteStatusAsync(context, StatusCodes.Status403Forbidden, CrossOriginMessage);
+            return null;
+        }
 
         IFormCollection form = await context.Request.ReadFormAsync(context.RequestAborted);
         if (UiSessionStore.IsValidCsrf(session!, form["csrf"].ToString()))
@@ -275,15 +291,17 @@ public sealed class AdminUiService
         return null;
     }
 
-    private static bool IsSameOrigin(HttpContext context)
-    {
-        string expected = $"{context.Request.Scheme}://{context.Request.Host}";
-        if (context.Request.Headers.TryGetValue("Origin", out StringValues origin))
-            return origin.Count == 1 && origin[0] == expected;
-        if (context.Request.Headers.TryGetValue("Referer", out StringValues referer))
-            return referer.Count == 1 && referer[0]!.StartsWith(expected + "/", StringComparison.Ordinal);
-        return false;
-    }
+    private static bool IsSameOrigin(HttpContext context) =>
+        SameOriginPolicy.IsSameOrigin(
+            context.Request.Scheme,
+            context.Request.Host.ToString(),
+            ReadSingleHeader(context, "Origin"),
+            ReadSingleHeader(context, "Referer"));
+
+    private static string? ReadSingleHeader(HttpContext context, string name) =>
+        context.Request.Headers.TryGetValue(name, out StringValues values) && values.Count == 1
+            ? values[0]
+            : null;
 
     private static long? ParseQuota(string value)
     {
@@ -328,7 +346,7 @@ public sealed class AdminUiService
         context.Response.Headers.CacheControl = "no-store";
         context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
         context.Response.Headers.XContentTypeOptions = "nosniff";
-        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+        context.Response.Headers["Referrer-Policy"] = "same-origin";
         string html = $$"""
             <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
             <title>{{Encode(title)}}</title><style>
