@@ -13,7 +13,18 @@ using RouterKely.Ui;
 
 string configPath = Environment.GetEnvironmentVariable("ROUTERKELY_CONFIG")
     ?? FindLocalConfiguration();
-LocalConfiguration localConfiguration = LocalConfiguration.Load(configPath);
+LocalConfiguration localConfiguration;
+try
+{
+    localConfiguration = LocalConfiguration.Load(configPath);
+}
+catch (InvalidOperationException exception)
+{
+    // Startup failures are read by an operator in the platform's log view, so report the
+    // message without a stack trace.
+    Console.Error.WriteLine($"router-kely: {exception.Message}");
+    return 1;
+}
 RouterConfiguration configuration = localConfiguration.RouterKely;
 
 var builder = WebApplication.CreateSlimBuilder(args);
@@ -145,6 +156,7 @@ app.MapPost("/ui/actions/config", ui.SaveConfigAsync);
 app.MapPost("/ui/actions/keys/{id:long}/revoke", ui.RevokeKeyAsync);
 
 await app.RunAsync();
+return 0;
 
 static string FindLocalConfiguration()
 {

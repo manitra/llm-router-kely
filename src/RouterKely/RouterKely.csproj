@@ -21,5 +21,9 @@
     <EmbeddedResource
       Include="Ui/Assets/pico.classless-2.1.1.min.css"
       LogicalName="RouterKely.Ui.pico.classless-2.1.1.min.css" />
+    <!-- Single source of truth for the first-start configuration file. -->
+    <EmbeddedResource
+      Include="../../config/router-kely.local.json.example"
+      LogicalName="RouterKely.Configuration.default-configuration.json" />
   </ItemGroup>
 </Project>

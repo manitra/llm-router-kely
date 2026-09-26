@@ -3,6 +3,9 @@ using Xunit;
 
 namespace RouterKely.Unit.Configuration;
 
+// Shares a collection with LocalConfigurationTests: both touch environment variables,
+// and xUnit runs test classes in parallel within one process.
+[Collection("configuration-env")]
 public sealed class ConfigurationAdminServiceTests : IDisposable
 {
     private readonly string _tempPath = Path.Combine(

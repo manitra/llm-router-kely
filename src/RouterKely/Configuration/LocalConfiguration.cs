@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -5,16 +7,17 @@ namespace RouterKely.Configuration;
 
 public sealed class LocalConfiguration
 {
+    /// <summary>Embedded copy of <c>config/router-kely.local.json.example</c>, written on first startup.</summary>
+    internal const string DefaultTemplateResourceName = "RouterKely.Configuration.default-configuration.json";
+
     public RouterConfiguration RouterKely { get; init; } = new();
 
     public static LocalConfiguration Load(string path)
     {
-        if (!File.Exists(path))
-            throw new InvalidOperationException(
-                $"Configuration file '{path}' was not found. Copy config/router-kely.local.json.example first.");
+        EnsureConfigurationFileExists(path);
 
         LocalConfiguration configuration = LoadRaw(path);
-        configuration.RouterKely.ExpandEnvironmentReferences();
+        configuration.RouterKely.ExpandEnvironmentReferences(Path.GetFullPath(path));
         configuration.RouterKely.Validate();
         return configuration;
     }
@@ -32,6 +35,59 @@ public sealed class LocalConfiguration
 
         configuration.RouterKely.ResolvePaths(Path.GetDirectoryName(Path.GetFullPath(path))!);
         return configuration;
+    }
+
+    /// <summary>
+    /// Creates the configuration file from the built-in default when it is absent, so a first
+    /// start (or a reset that deletes it) yields an editable file referencing the secrets
+    /// through environment variables instead of a startup failure.
+    /// </summary>
+    private static void EnsureConfigurationFileExists(string path)
+    {
+        if (File.Exists(path))
+            return;
+
+        string fullPath = Path.GetFullPath(path);
+        byte[] template = ReadDefaultTemplate();
+        using Stream resource = new MemoryStream(template);
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            using (FileStream stream = new(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                resource.CopyTo(stream);
+                stream.Flush(true);
+            }
+
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(fullPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch (IOException) when (File.Exists(fullPath))
+        {
+            return; // Another process created it first.
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                $"Cannot create the configuration file '{fullPath}': {exception.Message}. "
+                + "The directory is not writable by this user. Mount a Docker volume, or chown the "
+                + "host directory to 1654:1654.",
+                exception);
+        }
+
+        Console.Error.WriteLine(
+            $"router-kely: created {fullPath} from the built-in default. "
+            + "Edit it to set models, prices and quotas; the secrets it references come from the environment.");
+    }
+
+    private static byte[] ReadDefaultTemplate()
+    {
+        using Stream stream = typeof(LocalConfiguration).Assembly.GetManifestResourceStream(DefaultTemplateResourceName)
+            ?? throw new InvalidOperationException($"Missing embedded resource '{DefaultTemplateResourceName}'.");
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
     }
 }
 
@@ -63,33 +119,58 @@ public sealed class RouterConfiguration
 
     internal int EffectiveMaxConcurrentRequestsPerUser => MaxConcurrentRequestsPerUser ?? 32;
 
-    internal void ExpandEnvironmentReferences()
+    internal void ExpandEnvironmentReferences(string sourcePath)
     {
         Identity ??= new IdentityConfiguration();
         Statistics ??= new StatisticsConfiguration();
 
-        ClientApiKey = EnvironmentExpander.Expand(ClientApiKey, "RouterKely.ClientApiKey");
-        ListenUrl = EnvironmentExpander.Expand(ListenUrl, "RouterKely.ListenUrl");
+        // Every reference is collected before anything is thrown, so a first failed startup
+        // lists all the environment variables the operator has to define in one pass.
+        var missing = new List<MissingEnvironmentVariable>();
+
+        ClientApiKey = EnvironmentExpander.Expand(ClientApiKey, "RouterKely.ClientApiKey", missing);
+        ListenUrl = EnvironmentExpander.Expand(ListenUrl, "RouterKely.ListenUrl", missing);
         Upstream = Upstream with
         {
-            ApiKey = EnvironmentExpander.Expand(Upstream.ApiKey, "RouterKely.Upstream.ApiKey"),
-            BaseUrl = EnvironmentExpander.Expand(Upstream.BaseUrl, "RouterKely.Upstream.BaseUrl"),
+            ApiKey = EnvironmentExpander.Expand(Upstream.ApiKey, "RouterKely.Upstream.ApiKey", missing),
+            BaseUrl = EnvironmentExpander.Expand(Upstream.BaseUrl, "RouterKely.Upstream.BaseUrl", missing),
         };
         Identity = Identity with
         {
-            FilePath = EnvironmentExpander.Expand(Identity.FilePath, "RouterKely.Identity.FilePath"),
-            EnvironmentAdminName = EnvironmentExpander.Expand(Identity.EnvironmentAdminName, "RouterKely.Identity.EnvironmentAdminName"),
-            EnvironmentAdminEmail = EnvironmentExpander.Expand(Identity.EnvironmentAdminEmail, "RouterKely.Identity.EnvironmentAdminEmail"),
+            FilePath = EnvironmentExpander.Expand(Identity.FilePath, "RouterKely.Identity.FilePath", missing),
+            EnvironmentAdminName = EnvironmentExpander.Expand(Identity.EnvironmentAdminName, "RouterKely.Identity.EnvironmentAdminName", missing),
+            EnvironmentAdminEmail = EnvironmentExpander.Expand(Identity.EnvironmentAdminEmail, "RouterKely.Identity.EnvironmentAdminEmail", missing),
         };
         for (int index = 0; index < Models.Length; index++)
         {
             ModelConfiguration model = Models[index];
             Models[index] = model with
             {
-                Alias = EnvironmentExpander.Expand(model.Alias, $"RouterKely.Models[{index}].Alias"),
-                UpstreamModel = EnvironmentExpander.Expand(model.UpstreamModel, $"RouterKely.Models[{index}].UpstreamModel"),
+                Alias = EnvironmentExpander.Expand(model.Alias, $"RouterKely.Models[{index}].Alias", missing),
+                UpstreamModel = EnvironmentExpander.Expand(model.UpstreamModel, $"RouterKely.Models[{index}].UpstreamModel", missing),
             };
         }
+
+        if (missing.Count > 0)
+            throw new InvalidOperationException(BuildMissingVariablesMessage(sourcePath, missing));
+    }
+
+    private static string BuildMissingVariablesMessage(
+        string sourcePath,
+        List<MissingEnvironmentVariable> missing)
+    {
+        var builder = new StringBuilder();
+        builder.Append("Configuration file '").Append(sourcePath)
+            .AppendLine("' references environment variables that are not set. Define them and restart:");
+        foreach (IGrouping<string, MissingEnvironmentVariable> group in missing
+                     .GroupBy(item => item.Name, StringComparer.Ordinal)
+                     .OrderBy(group => group.Key, StringComparer.Ordinal))
+        {
+            builder.Append("  ").Append(group.Key).Append("  (referenced by ")
+                .Append(string.Join(", ", group.Select(item => item.FieldPath).Distinct(StringComparer.Ordinal)))
+                .AppendLine(")");
+        }
+        return builder.ToString().TrimEnd();
     }
 
     internal void ResolvePaths(string configurationDirectory)

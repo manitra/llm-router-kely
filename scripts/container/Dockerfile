@@ -29,6 +29,9 @@ COPY src/RouterKely/RouterKely.csproj src/RouterKely/
 RUN dotnet restore src/RouterKely/RouterKely.csproj --runtime "$(cat /tmp/rid)"
 
 COPY src/ src/
+# The executable embeds config/router-kely.local.json.example as its first-start default.
+# The ignore file excludes the local secret files, so only the template is copied.
+COPY config/ config/
 RUN dotnet publish src/RouterKely/RouterKely.csproj \
       --configuration Release \
       --runtime "$(cat /tmp/rid)" \
@@ -43,8 +46,15 @@ FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine AS runtime
 # edits and the identity file the admin UI rewrites. It is owned by the runtime user so
 # a Docker volume mounted here inherits working permissions.
 # ROUTERKELY_HEALTH_URL is the readiness URL the image health check probes.
+#
+# ASPNETCORE_FORWARDEDHEADERS_ENABLED makes the process honour X-Forwarded-Proto. The
+# platform reverse proxy terminates TLS, so without it Request.Scheme stays "http" while
+# the browser's Origin is "https", and every admin login fails the same-origin check
+# with 403. Trusting the immediate proxy is correct here because the container is only
+# reachable through it.
 ENV ROUTERKELY_CONFIG=/data/router-kely.local.json \
-    ROUTERKELY_HEALTH_URL=http://127.0.0.1:8080/health/ready
+    ROUTERKELY_HEALTH_URL=http://127.0.0.1:8080/health/ready \
+    ASPNETCORE_FORWARDEDHEADERS_ENABLED=true
 
 RUN mkdir -p /data \
  && chown app:app /data \
@@ -52,7 +62,6 @@ RUN mkdir -p /data \
 
 WORKDIR /app
 COPY --from=build /out/ ./
-COPY config/router-kely.local.json.example /app/config/router-kely.local.json.example
 COPY scripts/container/entrypoint.sh scripts/container/healthcheck.sh /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 

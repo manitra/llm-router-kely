@@ -3,6 +3,9 @@ using Xunit;
 
 namespace RouterKely.Unit.Configuration;
 
+// Shares a collection with ConfigurationAdminServiceTests: both touch environment variables,
+// and xUnit runs test classes in parallel within one process.
+[Collection("configuration-env")]
 public sealed class LocalConfigurationTests : IDisposable
 {
     // Unique names keep these tests isolated from other classes that set the
@@ -26,6 +29,74 @@ public sealed class LocalConfigurationTests : IDisposable
         Environment.SetEnvironmentVariable(UpstreamEnvVar, null);
         if (File.Exists(_tempPath))
             File.Delete(_tempPath);
+    }
+
+    [Fact]
+    public void LoadCreatesTheConfigurationFileFromTheBuiltInDefaultWhenAbsent()
+    {
+        Assert.False(File.Exists(_tempPath));
+
+        // The generated default references the production variable names, so provide them
+        // and confirm the created file is immediately loadable.
+        string? previousAdmin = Environment.GetEnvironmentVariable("ROUTERKELY_ADMIN_API_KEY");
+        string? previousUpstream = Environment.GetEnvironmentVariable("ROUTERKELY_DEEPSEEK_API_KEY");
+        Environment.SetEnvironmentVariable("ROUTERKELY_ADMIN_API_KEY", "admin-secret");
+        Environment.SetEnvironmentVariable("ROUTERKELY_DEEPSEEK_API_KEY", "upstream-secret");
+        try
+        {
+            LocalConfiguration loaded = LocalConfiguration.Load(_tempPath);
+
+            Assert.True(File.Exists(_tempPath));
+            string written = File.ReadAllText(_tempPath);
+            Assert.Contains("${ROUTERKELY_ADMIN_API_KEY}", written, StringComparison.Ordinal);
+            Assert.Contains("${ROUTERKELY_DEEPSEEK_API_KEY}", written, StringComparison.Ordinal);
+            Assert.NotEmpty(loaded.RouterKely.Models);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ROUTERKELY_ADMIN_API_KEY", previousAdmin);
+            Environment.SetEnvironmentVariable("ROUTERKELY_DEEPSEEK_API_KEY", previousUpstream);
+        }
+    }
+
+    [Fact]
+    public void LoadDoesNotOverwriteAnExistingConfigurationFile()
+    {
+        Seed();
+        string original = File.ReadAllText(_tempPath);
+
+        LocalConfiguration.Load(_tempPath);
+
+        Assert.Equal(original, File.ReadAllText(_tempPath));
+    }
+
+    [Fact]
+    public void LoadReportsEveryMissingVariableInOneError()
+    {
+        Seed();
+        Environment.SetEnvironmentVariable(AdminEnvVar, null);
+        Environment.SetEnvironmentVariable(UpstreamEnvVar, null);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => LocalConfiguration.Load(_tempPath));
+
+        // Both variables must be named in a single failure so the operator fixes them in one pass.
+        Assert.Contains(AdminEnvVar, exception.Message);
+        Assert.Contains(UpstreamEnvVar, exception.Message);
+        Assert.Contains("RouterKely.ClientApiKey", exception.Message);
+        Assert.Contains("RouterKely.Upstream.ApiKey", exception.Message);
+        Assert.Contains(_tempPath, exception.Message);
+    }
+
+    [Fact]
+    public void LoadReportsOnlyTheVariablesThatAreActuallyMissing()
+    {
+        Seed();
+        Environment.SetEnvironmentVariable(UpstreamEnvVar, null);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => LocalConfiguration.Load(_tempPath));
+
+        Assert.Contains(UpstreamEnvVar, exception.Message);
+        Assert.DoesNotContain(AdminEnvVar, exception.Message);
     }
 
     [Fact]

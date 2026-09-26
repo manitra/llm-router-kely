@@ -154,7 +154,7 @@ DOCKERFILE
 }
 
 # Coolify needs the repository root as the build context, because the Dockerfile
-# reads the sources, the configuration template, and the entrypoint scripts.
+# reads the application sources and the entrypoint scripts.
 assert_compose_build_context() {
   echo "==> Asserting the compose file builds the relocated Dockerfile from the repo root"
   if ! docker compose version >/dev/null 2>&1; then
@@ -195,11 +195,18 @@ wait_for_ready "$container" || {
   fail "the container did not become ready"
 }
 
-echo "==> Asserting the configuration file was seeded into the volume"
-volume_has_config || fail "$config_path was not seeded"
+echo "==> Asserting the configuration file was created in the volume on first start"
+volume_has_config || fail "$config_path was not created"
 content="$(read_config)" || fail "$config_path is unreadable"
-grep -q '"routerKely"' <<< "$content" || fail "the seeded configuration is not the expected template"
-grep -q '"maxConcurrentRequests": 256' <<< "$content" || fail "the seeded configuration was modified"
+grep -q '"routerKely"' <<< "$content" || fail "the created configuration is not the expected default"
+grep -q '"maxConcurrentRequests": 256' <<< "$content" || fail "the created configuration was modified"
+grep -q '${ROUTERKELY_ADMIN_API_KEY}' <<< "$content" ||
+  fail "the created configuration does not reference ROUTERKELY_ADMIN_API_KEY"
+grep -q '${ROUTERKELY_DEEPSEEK_API_KEY}' <<< "$content" ||
+  fail "the created configuration does not reference ROUTERKELY_DEEPSEEK_API_KEY"
+if grep -q "$admin_key" <<< "$content"; then
+  fail "the created configuration contains the administrator key in plaintext"
+fi
 
 echo "==> Asserting the router is unprivileged on a read-only root filesystem"
 [[ "$(process_uid "$container")" == "1654" ]] ||
@@ -210,14 +217,14 @@ docker exec "$container" sh -c 'touch /app/probe' 2>/dev/null &&
 echo "==> Asserting the image health check succeeds"
 docker exec "$container" /usr/local/bin/healthcheck.sh || fail "the health check script failed"
 
-echo "==> Asserting the environment key is accepted and the file placeholder is not"
+echo "==> Asserting the environment key is accepted and an unknown key is rejected"
 curl --fail --silent --output /dev/null \
   --header "Authorization: Bearer $admin_key" \
   "http://127.0.0.1:$port/v1/models" || fail "environment administrator key was rejected"
 status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "Authorization: Bearer sk-rk-local-change-me" \
+  --header "Authorization: Bearer sk-rk-not-a-configured-key" \
   "http://127.0.0.1:$port/v1/models")"
-[[ "$status" == "401" ]] || fail "configuration placeholder key returned $status instead of 401"
+[[ "$status" == "401" ]] || fail "an unconfigured key returned $status instead of 401"
 
 echo "==> Asserting an edited configuration survives a restart"
 edit_config 's/"maxConcurrentRequests": 256/"maxConcurrentRequests": 128/'
@@ -230,13 +237,15 @@ wait_for_ready "$container" || {
 grep -q '"maxConcurrentRequests": 128' <<< "$(read_config)" ||
   fail "the container overwrote the operator's configuration file"
 
-echo "==> Asserting startup fails without the required secrets"
+echo "==> Asserting startup fails with one exhaustive report of the missing secrets"
 docker rm --force "$probe" >/dev/null 2>&1 || true
 docker run --detach --name "$probe" "$image" >/dev/null
 wait_for_exit "$probe" || fail "container started without ROUTERKELY_ADMIN_API_KEY and ROUTERKELY_DEEPSEEK_API_KEY"
 docker logs "$probe" >"$work_dir/missing-secrets.log" 2>&1 || true
 grep -q "ROUTERKELY_ADMIN_API_KEY" "$work_dir/missing-secrets.log" ||
-  fail "missing-secret failure did not name the missing variable"
+  fail "missing-secret failure did not name ROUTERKELY_ADMIN_API_KEY"
+grep -q "ROUTERKELY_DEEPSEEK_API_KEY" "$work_dir/missing-secrets.log" ||
+  fail "missing-secret failure did not name ROUTERKELY_DEEPSEEK_API_KEY in the same report"
 docker rm --force "$probe" >/dev/null
 
 echo "==> Asserting an edited configuration in the volume is validated on startup"

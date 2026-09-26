@@ -139,7 +139,7 @@ An inference handler may depend only on preconstructed singleton services and im
 
 ### 4.2 Startup sequence
 
-1. Parse and validate configuration. Refuse startup on missing secrets, duplicate aliases, invalid prices, or a non-HTTPS upstream unless explicitly in development mode.
+1. Parse and validate configuration. Create the configuration file from the built-in default when it is absent. Resolve every `${NAME}` reference, reporting all unresolved ones in a single error. Refuse startup on missing secrets, duplicate aliases, invalid prices, or a non-HTTPS upstream unless explicitly in development mode.
 2. Load and validate the configured identity provider. By default, read the identity file and hash the environment-supplied administrator key directly into the snapshot.
 3. Initialize empty current-day and historical in-memory aggregates. A restart intentionally starts usage at zero for the default statistics provider.
 4. Create the singleton `SocketsHttpHandler` and `HttpClient`.
@@ -476,6 +476,8 @@ HttpOnly; Secure; SameSite=Strict; Path=/ui
 The login form MUST warn users that the key is submitted only to create the session and is not stored. Browser local/session storage MUST NOT contain the key.
 
 The `Secure` cookie flag is mandatory under HTTPS. The loopback-only HTTP development listener may omit it so the local administration UI remains usable; non-loopback deployments require TLS.
+
+The same-origin check and the `Secure` cookie both derive from the request scheme, so a deployment behind a TLS-terminating proxy must let the process see the original scheme. The container image sets `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` so `X-Forwarded-Proto` is honoured; without it the process sees `http` while the browser sends an `https` `Origin` and every login is rejected with 403.
 
 ### 10.3 Bootstrap
 
@@ -881,9 +883,21 @@ Example:
 
 Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing.
 
-#### Environment expansion
+#### First start and environment expansion
 
-Any string value in the configuration file may embed `${NAME}` references. The literal text is written to disk; at startup LLM Router Kely walks every string field, resolves each reference against the process environment, and validates the result. A missing variable fails startup with a message that names the field path (for example `RouterKely.Upstream.ApiKey`) and the variable name, so the operator sees which environment entry the platform must inject. A literal `$` is produced with `$$`. The expansion is intentionally pure text replacement: no shell-style defaults, no command substitution, no recursion. Because the on-disk text is preserved verbatim, the admin configuration editor shows the literal `${VAR}` reference, not the resolved secret, and edits round-trip without leaking plaintext into the file. The shipped example uses this for every secret:
+When the configuration file is absent — a first start, or a reset that deletes it — LLM Router Kely creates it from a copy of `config/router-kely.local.json.example` embedded in the executable, with owner-only permissions, and reports the path on stderr. The created file is immediately usable: it references its secrets through environment variables instead of carrying placeholders. An existing file is never overwritten, so operator edits survive restarts and redeployments.
+
+Any string value in the configuration file may embed `${NAME}` references. The literal text is written to disk; at startup LLM Router Kely walks every string field and resolves each reference against the process environment. A literal `$` is produced with `$$`. The expansion is intentionally pure text replacement: no shell-style defaults, no command substitution, no recursion.
+
+References that cannot be resolved fail startup. The process collects **every** unresolved reference before failing and reports them in a single message that names each variable and the configuration field that expects it:
+
+```text
+router-kely: Configuration file '/data/router-kely.local.json' references environment variables that are not set. Define them and restart:
+  ROUTERKELY_ADMIN_API_KEY  (referenced by RouterKely.ClientApiKey)
+  ROUTERKELY_DEEPSEEK_API_KEY  (referenced by RouterKely.Upstream.ApiKey)
+```
+
+An operator reading the container log after the first failure therefore has the complete list of environment variables to define in the platform, not just the first one encountered. Because the on-disk text is preserved verbatim, the admin configuration editor shows the literal `${VAR}` reference, not the resolved secret, and edits round-trip without leaking plaintext into the file. The shipped example uses this for every secret:
 
 ```json
 {
@@ -897,7 +911,7 @@ Any string value in the configuration file may embed `${NAME}` references. The l
 }
 ```
 
-The container entrypoint still refuses to start when the referenced environment variables are not set, so a missing platform secret surfaces as a clear error rather than an empty authorization header.
+A missing platform secret therefore surfaces as one explicit startup error rather than an empty authorization header or a partially working deployment.
 
 Environment overrides use double underscores, for example `RouterKely__Upstream__BaseUrl`. Log the effective non-secret configuration at startup with secrets redacted.
 
@@ -958,22 +972,22 @@ Container environment contract:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `ROUTERKELY_ADMIN_API_KEY` | yes | Administrator bearer key referenced as `${ROUTERKELY_ADMIN_API_KEY}` from the seeded configuration. |
-| `ROUTERKELY_DEEPSEEK_API_KEY` | yes | Upstream credential referenced as `${ROUTERKELY_DEEPSEEK_API_KEY}` from the seeded configuration. |
+| `ROUTERKELY_ADMIN_API_KEY` | yes | Administrator bearer key referenced as `${ROUTERKELY_ADMIN_API_KEY}` from the created configuration. |
+| `ROUTERKELY_DEEPSEEK_API_KEY` | yes | Upstream credential referenced as `${ROUTERKELY_DEEPSEEK_API_KEY}` from the created configuration. |
 | `ROUTERKELY_CONFIG` | no | Defaults to `/data/router-kely.local.json`. |
-| `ROUTERKELY_CONFIG_TEMPLATE` | no | Defaults to `/app/config/router-kely.local.json.example`. |
 | `ROUTERKELY_HEALTH_URL` | no | Defaults to `http://127.0.0.1:8080/health/ready`, used by the image health check. |
+| `ASPNETCORE_FORWARDEDHEADERS_ENABLED` | yes | Set to `true` in the image. Makes the process honour `X-Forwarded-Proto` so the admin UI works behind the platform's TLS-terminating proxy. |
 
 Container behavior:
 
-- The entrypoint refuses to start when either referenced secret is missing, because the seeded configuration file carries `${NAME}` references that cannot resolve.
-- On first start the entrypoint copies the template to `ROUTERKELY_CONFIG` with owner-only permissions and reports that the operator should edit it. An existing file is never overwritten, so operator edits survive restarts and redeployments.
+- The entrypoint checks that the configuration directory is writable and then starts the router; it does not inspect secrets. The router creates the configuration file when it is absent and refuses to start when a referenced environment variable is missing, reporting all of them in one message. Both behaviours live in the executable so they are identical for container and local runs.
+- On first start the router itself creates the configuration file in the volume with owner-only permissions and reports the path; an existing file is never overwritten, so operator edits survive restarts and redeployments.
 - The container never starts as root and MUST NOT take ownership of a mounted directory or otherwise modify host state, so `/data` has to be writable by uid `1654` before the container starts. Running as root merely to claim a bind mount was tried and rejected: it takes the directory away from its owner, which breaks host-side access and cleanup, and that failure is invisible on Docker Desktop because it presents bind mounts as writable regardless of ownership.
 - A Docker volume mounted at `/data` inherits the ownership of the image's `/data` directory, so it needs no host-side preparation; this is what an orchestrator's managed storage provides. A host bind mount MUST be chowned to `1654:1654`. When the directory is not writable, startup fails with a diagnostic that names the remedy rather than a bare `mkdir` or `cp` error.
 - The configuration and identity files are read once at startup, so a change requires a container restart. The admin UI rewrites the identity file while the container runs, so it MUST NOT be edited concurrently: either manage users through the UI or stop the container first.
 - TLS is terminated by the platform reverse proxy. The container listener stays plain HTTP on the internal network and MUST NOT be published without TLS in front of it. The process listens on `0.0.0.0`, which the platform proxy requires.
 - On a platform that asks for a build context and a Dockerfile path separately, the context is the repository root and the Dockerfile path is `scripts/container/Dockerfile`.
-- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, compose build settings, the declared image user, first-boot seeding into a volume, the unprivileged router process, read-only root filesystem, working health check, environment secrets accepted while the file placeholder is rejected, operator configuration surviving a restart, refusal of an invalid configuration, and the missing-secret and unusable-volume diagnostics. Every check runs on every platform: an unusable volume is a root-owned Docker volume with a marker file, because Docker re-initializes an empty volume from the image and a Docker Desktop bind mount ignores ownership, either of which would mask the behaviour under test.
+- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, compose build settings, the declared image user, creation of the configuration file in the volume on first start, the unprivileged router process, read-only root filesystem, working health check, the environment administrator key accepted while an unconfigured key is rejected, operator configuration surviving a restart, refusal of an invalid configuration, the single exhaustive missing-variable report, and the unusable-volume diagnostic. Every check runs on every platform: an unusable volume is a root-owned Docker volume with a marker file, because Docker re-initializes an empty volume from the image and a Docker Desktop bind mount ignores ownership, either of which would mask the behaviour under test.
 
 ### 15.2 Published image
 
@@ -996,7 +1010,7 @@ Registry changes require no credentials for pulling because the package is publi
 ## 16. Security requirements
 
 - TLS is mandatory outside local development. LLM Router Kely may terminate TLS or run behind a trusted TLS reverse proxy.
-- Configure trusted proxy networks explicitly; otherwise ignore forwarded client identity headers.
+- Configure trusted proxy networks explicitly; otherwise ignore forwarded client identity headers. The certified container is a single hop reachable only through the platform's proxy, so its image enables forwarded headers for the original scheme; the listener must never be published without that proxy in front.
 - Never log authorization headers, cookies, request/response bodies, query strings containing secrets, upstream credentials, or generated plaintext keys.
 - Structured logs use numeric user/key IDs, public alias, status class, duration bucket, and request ID only.
 - Optional database adapters use parameterized SQL exclusively and a least-privilege database role.
