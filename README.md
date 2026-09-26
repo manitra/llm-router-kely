@@ -1,6 +1,7 @@
 # LLM Router Kely
 
 [![CI](https://github.com/manitra/llm-router-kely/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/manitra/llm-router-kely/actions/workflows/ci.yml)
+[![unit tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fmanitra.github.io%2Fllm-router-kely%2Fbadges%2Ftests.json&cacheSeconds=300)](https://github.com/manitra/llm-router-kely/actions/workflows/ci.yml)
 [![p50 overhead](https://img.shields.io/endpoint?url=https%3A%2F%2Fmanitra.github.io%2Fllm-router-kely%2Fbadges%2Fp50.json&cacheSeconds=300)](https://github.com/manitra/llm-router-kely/actions/workflows/ci.yml)
 [![alloc / request](https://img.shields.io/endpoint?url=https%3A%2F%2Fmanitra.github.io%2Fllm-router-kely%2Fbadges%2Fallocation.json&cacheSeconds=300)](https://github.com/manitra/llm-router-kely/actions/workflows/ci.yml)
 [![binary size](https://img.shields.io/endpoint?url=https%3A%2F%2Fmanitra.github.io%2Fllm-router-kely%2Fbadges%2Fbinary.json&cacheSeconds=300)](https://github.com/manitra/llm-router-kely/actions/workflows/ci.yml)
