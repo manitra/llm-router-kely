@@ -437,15 +437,16 @@ All browser UI routes live under `/ui`:
 | `/ui` | Redirect to dashboard. |
 | `/ui/dashboard` | Own daily usage, quota, remaining amount, model split. |
 | `/ui/keys` | Own key list; create, rename, revoke. |
-| `/ui/admin/users` | Admin user list with usage/quota/status. |
-| `/ui/admin/users/{id}` | Admin edit user and manage that user's keys. |
+| `/ui/admin/users` | Admin user list with usage/quota/status, an edit link per row, and an add-user link. |
+| `/ui/admin/users/new` | Admin add-user form. |
+| `/ui/admin/users/{id}` | Admin edit-user form (upsert) plus that user's keys. |
 | `/ui/admin/usage` | System totals and per-user/model aggregates. |
 
 The look and route placement SHOULD feel familiar to LiteLLM users, but pixel/API parity is not a goal. The UI must work without JavaScript for primary operations. Small progressive-enhancement JavaScript embedded in the executable is allowed.
 
-The UI uses the pinned Pico CSS 2.1.1 classless build. Its minified stylesheet is vendored as an embedded resource and served from the immutable, versioned same-origin path `/ui/assets/pico.classless-2.1.1.min.css`; browsers never fetch UI code, styles, fonts, or analytics from a third party. The HTML shell uses a direct `<main>` child of `<body>` so Pico provides the centered responsive container without framework-specific classes.
+The UI uses the pinned Pico CSS 2.1.1 classless build. Its minified stylesheet is vendored as an embedded resource and served from the immutable, versioned same-origin path `/ui/assets/pico.classless-2.1.1.min.css`; browsers never fetch UI code, styles, fonts, or analytics from a third party. The stylesheet embeds its form-control indicator glyphs as inline `data:` URIs, so the page CSP is `default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`. The HTML shell uses a direct `<main>` child of `<body>` so Pico provides the centered responsive container without framework-specific classes.
 
-The initial administration UI is intentionally one server-rendered users table plus one user-detail page. “Remove user” means disable the user; “remove key” means revoke the key. Neither operation physically deletes identity history. The user-detail page generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
+The initial administration UI is intentionally one server-rendered users table plus one upsert user form. The list page contains no forms other than sign-out; every row offers an `Edit` link and the table footer offers an `Add user` link, and both open the same form at `/ui/admin/users/new` or `/ui/admin/users/{id}`. `POST /ui/actions/users` upserts: an absent `id` creates a user, a present `id` updates name, email, quota, and enabled state. “Remove user” means disabling the user via that form; “remove key” means revoking the key. Neither operation physically deletes identity history. The user form generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
 
 ### 10.2 Browser session
 
@@ -1047,6 +1048,8 @@ CI compares the candidate with the default branch on the same runner. Fail when:
 Benchmark noise must be controlled with warm-up, CPU affinity where available, repeated samples, and median-of-runs reporting. Store machine/runtime metadata with results.
 
 The default `scripts/tests.sh` run publishes and executes the release Native AOT binary in a temporary directory, then runs a short, concurrency-1 end-to-end smoke benchmark against a local deterministic upstream. It prints interleaved direct/upstream and routed p50/p95/p99 latency, incremental p50/p95/p99 overhead, sequential throughput, process-wide allocated bytes per routed request, idle working set after load, executable size, and publish-file count. The `<= 8 KiB/request` allocation, `< 100 MiB` idle working-set, `<= 20 MiB` executable-size, and exactly-one-published-file limits are always enforced so local and CI runs cannot silently grow the footprint. The harness enables `ROUTERKELY_BENCHMARK_METRICS=true`, which conditionally exposes `/internal/benchmark/allocated-bytes`; production deployments MUST NOT enable it. The smoke also verifies that per-user concurrency saturation rejects immediately without queueing. Latency results are informational on ordinary developer machines; setting `ROUTERKELY_PERF_ENFORCE=true` also enforces the p50 and p99 incremental latency limits on controlled CI runners. `ROUTERKELY_PERF_WARMUP` and `ROUTERKELY_PERF_SAMPLES` may increase sample counts without changing the scenario.
+
+GitHub Actions runs `scripts/tests.sh` on every pushed commit and pull request. After a successful push to `main`, CI extracts the p50 incremental overhead, allocated bytes per routed request, and Native AOT binary size into Shields-compatible JSON artifacts; a separate least-privilege workflow publishes only those artifacts through GitHub Pages so badge publication cannot affect the test result.
 
 The harness may set `Upstream.AllowInsecureLoopback=true` only for a loopback HTTP mock. The option never permits plaintext traffic to a non-loopback address and defaults to false.
 

@@ -40,7 +40,7 @@ public abstract record IdentityMutation;
 
 public sealed record AddUserMutation(IdentityUser User) : IdentityMutation;
 
-public sealed record SetUserEnabledMutation(long UserId, bool Enabled) : IdentityMutation;
+public sealed record UpdateUserMutation(IdentityUser User) : IdentityMutation;
 
 public sealed record AddKeyMutation(IdentityKey Key) : IdentityMutation;
 

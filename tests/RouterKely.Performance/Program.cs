@@ -133,7 +133,7 @@ try
     Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
 
     await RunAdminUiSmokeAsync(routerUrl);
-    Console.WriteLine("  admin UI:   PASS (login, create user/key, authenticate, revoke)");
+    Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke)");
     await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, slowRequest);
     Console.WriteLine("  concurrency: PASS (per-user limit rejects immediately without queueing)");
 
@@ -340,17 +340,20 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
     }
 
     string usersCsrf = ExtractBetween(usersHtml, "name=\"csrf\" value=\"", "\"");
-    using (var createUser = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/users/create"))
+    if (!usersHtml.Contains("/ui/admin/users/new"))
+        throw new InvalidOperationException("Admin users list is missing the add-user link.");
+    using (var saveUser = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/users"))
     {
-        createUser.Headers.Add("Origin", origin);
-        createUser.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        saveUser.Headers.Add("Origin", origin);
+        saveUser.Content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["csrf"] = usersCsrf,
             ["name"] = "Performance User",
             ["email"] = "performance@example.com",
-            ["quotaUsd"] = "1"
+            ["quotaUsd"] = "1",
+            ["enabled"] = "true"
         });
-        using HttpResponseMessage response = await client.SendAsync(createUser);
+        using HttpResponseMessage response = await client.SendAsync(saveUser);
         EnsureStatus(response, HttpStatusCode.Redirect, "create user");
     }
 
@@ -405,6 +408,39 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
         models.Headers.Authorization = new AuthenticationHeaderValue("Bearer", plaintextKey);
         using HttpResponseMessage response = await client.SendAsync(models);
         EnsureStatus(response, HttpStatusCode.Unauthorized, "revoked key authentication");
+    }
+
+    using (var updateUser = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/users"))
+    {
+        updateUser.Headers.Add("Origin", origin);
+        updateUser.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["csrf"] = userCsrf,
+            ["id"] = "2",
+            ["name"] = "Performance User Edited",
+            ["email"] = "performance@example.com",
+            ["quotaUsd"] = "2",
+            ["enabled"] = "true"
+        });
+        using HttpResponseMessage response = await client.SendAsync(updateUser);
+        EnsureStatus(response, HttpStatusCode.Redirect, "update user");
+    }
+
+    using (HttpResponseMessage user = await client.GetAsync($"{routerUrl}/ui/admin/users/2"))
+    {
+        EnsureStatus(user, HttpStatusCode.OK, "edited user page");
+        string editedHtml = await user.Content.ReadAsStringAsync();
+        if (!editedHtml.Contains("value=\"Performance User Edited\"") || !editedHtml.Contains("value=\"2\""))
+            throw new InvalidOperationException("Admin user edit form did not persist the update.");
+    }
+
+    using (HttpResponseMessage users = await client.GetAsync($"{routerUrl}/ui/admin/users"))
+    {
+        EnsureStatus(users, HttpStatusCode.OK, "edited users list");
+        string editedListHtml = await users.Content.ReadAsStringAsync();
+        if (!editedListHtml.Contains("href=\"/ui/admin/users/2\">Edit</a>") ||
+            !editedListHtml.Contains("Performance User Edited"))
+            throw new InvalidOperationException("Admin users list did not show the edited user and its edit link.");
     }
 }
 

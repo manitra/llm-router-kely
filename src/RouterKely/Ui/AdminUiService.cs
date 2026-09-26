@@ -125,38 +125,32 @@ public sealed class AdminUiService
             return;
 
         var html = new StringBuilder(4_096);
-        html.Append("<h1>Users</h1><p><a href=\"/ui/admin/users\">Users</a></p>");
-        html.Append("<table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Quota</th></tr></thead><tbody>");
+        html.Append("<h1>Users</h1>");
+        html.Append("<table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Quota</th><th></th></tr></thead><tbody>");
         foreach (IdentityUser user in _identities.Snapshot.Users.OrderBy(user => user.Id))
         {
-            html.Append("<tr><td>");
-            if (user.IsEnvironment)
-                Encode(html, user.Name);
-            else
-                html.Append("<a href=\"/ui/admin/users/").Append(user.Id).Append("\">").Append(Encode(user.Name)).Append("</a>");
-            html.Append("</td><td>").Append(Encode(user.Email))
+            html.Append("<tr><td>").Append(Encode(user.Name))
+                .Append("</td><td>").Append(Encode(user.Email))
                 .Append("</td><td>").Append(user.Role == IdentityRole.Admin ? "admin" : "user")
                 .Append("</td><td>").Append(user.Enabled ? "enabled" : "disabled")
-                .Append("</td><td>").Append(FormatQuota(user.QuotaNanoUsd)).Append("</td></tr>");
+                .Append("</td><td>").Append(FormatQuota(user.QuotaNanoUsd)).Append("</td><td>");
+            if (!user.IsEnvironment)
+                html.Append("<a href=\"/ui/admin/users/").Append(user.Id).Append("\">Edit</a>");
+            html.Append("</td></tr>");
         }
-        html.Append("</tbody></table>");
-        html.Append("""
-            <h2>Add user</h2>
-            <form method="post" action="/ui/actions/users/create">
-        """);
-        AppendCsrf(html, session!);
-        html.Append("""
-              <label>Name <input name="name" maxlength="100" required></label>
-              <label>Email <input name="email" type="email" maxlength="254" required></label>
-              <label>Daily quota USD <input name="quotaUsd" type="number" min="0" step="0.000000001" placeholder="unlimited"></label>
-              <button type="submit">Add user</button>
-            </form>
-        """);
+        html.Append("</tbody></table><p><a href=\"/ui/admin/users/new\" role=\"button\">Add user</a></p>");
         AppendLogout(html, session!);
         await WritePageAsync(context, "Users", html.ToString());
     }
 
-    public async Task UserAsync(HttpContext context, long id, string? message = null)
+    public async Task NewUserAsync(HttpContext context)
+    {
+        if (!RequireAdmin(context, out UiSession? session, out _))
+            return;
+        await WriteUserFormAsync(context, session!, user: null);
+    }
+
+    public async Task UserAsync(HttpContext context, long id)
     {
         if (!RequireAdmin(context, out UiSession? session, out _))
             return;
@@ -168,15 +162,37 @@ public sealed class AdminUiService
             return;
         }
 
+        await WriteUserFormAsync(context, session!, user);
+    }
+
+    private async Task WriteUserFormAsync(HttpContext context, UiSession session, IdentityUser? user)
+    {
+        string heading = user is null ? "Add user" : "Edit user";
         var html = new StringBuilder(4_096);
-        html.Append("<p><a href=\"/ui/admin/users\">← Users</a></p><h1>").Append(Encode(user.Name)).Append("</h1>")
-            .Append("<p>").Append(Encode(user.Email)).Append(" · ").Append(user.Enabled ? "enabled" : "disabled").Append(" · quota ")
-            .Append(FormatQuota(user.QuotaNanoUsd)).Append("</p>");
-        if (!string.IsNullOrEmpty(message))
-            html.Append("<p><strong>").Append(Encode(message)).Append("</strong></p>");
-        html.Append("<form method=\"post\" action=\"/ui/actions/users/").Append(user.Id).Append(user.Enabled ? "/disable\">" : "/enable\">");
-        AppendCsrf(html, session!);
-        html.Append("<button type=\"submit\">").Append(user.Enabled ? "Disable user" : "Enable user").Append("</button></form>");
+        html.Append("<p><a href=\"/ui/admin/users\">← Users</a></p><h1>").Append(heading).Append("</h1>");
+
+        html.Append("<form method=\"post\" action=\"/ui/actions/users\">");
+        AppendCsrf(html, session);
+        if (user is not null)
+            html.Append("<input type=\"hidden\" name=\"id\" value=\"").Append(user.Id).Append("\">");
+        html.Append("<label>Name <input name=\"name\" maxlength=\"100\" required value=\"")
+            .Append(Encode(user?.Name ?? string.Empty)).Append("\"></label>");
+        html.Append("<label>Email <input name=\"email\" type=\"email\" maxlength=\"254\" required value=\"")
+            .Append(Encode(user?.Email ?? string.Empty)).Append("\"></label>");
+        html.Append("<label>Daily quota USD <input name=\"quotaUsd\" type=\"number\" min=\"0\" step=\"0.000000001\" placeholder=\"unlimited\" value=\"")
+            .Append(FormatQuotaInput(user?.QuotaNanoUsd)).Append("\"></label>");
+        bool isEnabled = user?.Enabled ?? true;
+        html.Append("<label>Status <select name=\"enabled\"><option value=\"true\"")
+            .Append(isEnabled ? " selected" : string.Empty)
+            .Append(">enabled</option><option value=\"false\"")
+            .Append(isEnabled ? string.Empty : " selected")
+            .Append(">disabled</option></select></label>");
+        html.Append("<button type=\"submit\">").Append(user is null ? "Add user" : "Save changes").Append("</button></form>");
+        if (user is null)
+        {
+            await WritePageAsync(context, heading, html.ToString());
+            return;
+        }
 
         html.Append("<h2>Keys</h2><table><thead><tr><th>Name</th><th>Key</th><th>Status</th><th></th></tr></thead><tbody>");
         foreach (IdentityKey key in _identities.Snapshot.Keys.Where(key => key.UserId == user.Id).OrderBy(key => key.Id))
@@ -186,18 +202,18 @@ public sealed class AdminUiService
             if (key.Enabled)
             {
                 html.Append("<form method=\"post\" action=\"/ui/actions/keys/").Append(key.Id).Append("/revoke\">");
-                AppendCsrf(html, session!);
+                AppendCsrf(html, session);
                 html.Append("<button type=\"submit\">Revoke</button></form>");
             }
             html.Append("</td></tr>");
         }
         html.Append("</tbody></table><h2>Add key</h2><form method=\"post\" action=\"/ui/actions/users/").Append(user.Id).Append("/keys/create\">");
-        AppendCsrf(html, session!);
+        AppendCsrf(html, session);
         html.Append("<label>Name <input name=\"name\" maxlength=\"100\" required></label><button type=\"submit\">Generate key</button></form>");
-        await WritePageAsync(context, user.Name, html.ToString());
+        await WritePageAsync(context, heading, html.ToString());
     }
 
-    public async Task CreateUserAsync(HttpContext context)
+    public async Task SaveUserAsync(HttpContext context)
     {
         PostContext? post = await RequireAdminPostAsync(context);
         if (post is null)
@@ -206,11 +222,15 @@ public sealed class AdminUiService
         try
         {
             IFormCollection form = post.Form;
+            long? id = ParseUserId(form["id"].ToString());
             long? quota = ParseQuota(form["quotaUsd"].ToString());
-            IdentityUser user = await _identities.CreateUserAsync(
+            bool enabled = string.Equals(form["enabled"].ToString(), "true", StringComparison.Ordinal);
+            IdentityUser user = await _identities.SaveUserAsync(
+                id,
                 form["name"].ToString(),
                 form["email"].ToString(),
                 quota,
+                enabled,
                 context.RequestAborted);
             context.Response.Redirect($"/ui/admin/users/{user.Id}");
         }
@@ -219,10 +239,6 @@ public sealed class AdminUiService
             await WriteStatusAsync(context, StatusCodes.Status400BadRequest, exception.Message);
         }
     }
-
-    public Task DisableUserAsync(HttpContext context, long id) => SetUserEnabledAsync(context, id, false);
-
-    public Task EnableUserAsync(HttpContext context, long id) => SetUserEnabledAsync(context, id, true);
 
     public async Task CreateKeyAsync(HttpContext context, long id)
     {
@@ -258,21 +274,6 @@ public sealed class AdminUiService
             IdentityKey? key = _identities.Snapshot.Keys.SingleOrDefault(key => key.Id == id);
             await _identities.RevokeKeyAsync(id, context.RequestAborted);
             context.Response.Redirect(key is null ? "/ui/admin/users" : $"/ui/admin/users/{key.UserId}");
-        }
-        catch (InvalidOperationException exception)
-        {
-            await WriteStatusAsync(context, StatusCodes.Status400BadRequest, exception.Message);
-        }
-    }
-
-    private async Task SetUserEnabledAsync(HttpContext context, long id, bool enabled)
-    {
-        if (await RequireAdminPostAsync(context) is null)
-            return;
-        try
-        {
-            await _identities.SetUserEnabledAsync(id, enabled, context.RequestAborted);
-            context.Response.Redirect($"/ui/admin/users/{id}");
         }
         catch (InvalidOperationException exception)
         {
@@ -324,6 +325,15 @@ public sealed class AdminUiService
             ? values[0]
             : null;
 
+    private static long? ParseUserId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long id) || id <= 0)
+            throw new InvalidOperationException("Invalid user identifier.");
+        return id;
+    }
+
     private static long? ParseQuota(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -341,6 +351,11 @@ public sealed class AdminUiService
             ? $"${value / 1_000_000_000m:0.#########}/day"
             : "unlimited";
 
+    private static string FormatQuotaInput(long? nanoUsd) =>
+        nanoUsd is long value
+            ? (value / 1_000_000_000m).ToString("0.#########", CultureInfo.InvariantCulture)
+            : string.Empty;
+
     private static void AppendCsrf(StringBuilder html, UiSession session) =>
         html.Append("<input type=\"hidden\" name=\"csrf\" value=\"").Append(Encode(session.CsrfToken)).Append("\">");
 
@@ -353,8 +368,6 @@ public sealed class AdminUiService
 
     private static string Encode(string value) => HtmlEncoder.Default.Encode(value);
 
-    private static void Encode(StringBuilder target, string value) => target.Append(Encode(value));
-
     private static async Task WriteStatusAsync(HttpContext context, int status, string message)
     {
         context.Response.StatusCode = status;
@@ -365,7 +378,8 @@ public sealed class AdminUiService
     {
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+        context.Response.Headers.ContentSecurityPolicy =
+            "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers["Referrer-Policy"] = "same-origin";
         string html = $$"""

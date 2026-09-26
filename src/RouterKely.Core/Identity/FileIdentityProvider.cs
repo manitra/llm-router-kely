@@ -72,13 +72,15 @@ public sealed class FileIdentityProvider : IIdentityProvider
             Version = snapshot.Version + 1,
             Users = [.. snapshot.Users, add.User]
         },
-        SetUserEnabledMutation set => snapshot with
-        {
-            Version = snapshot.Version + 1,
-            Users = snapshot.Users
-                .Select(user => user.Id == set.UserId ? user with { Enabled = set.Enabled } : user)
-                .ToArray()
-        },
+        UpdateUserMutation update => snapshot.Users.Any(user => user.Id == update.User.Id)
+            ? snapshot with
+            {
+                Version = snapshot.Version + 1,
+                Users = snapshot.Users
+                    .Select(user => user.Id == update.User.Id ? update.User : user)
+                    .ToArray()
+            }
+            : throw new InvalidOperationException("User not found."),
         AddKeyMutation add => snapshot with
         {
             Version = snapshot.Version + 1,

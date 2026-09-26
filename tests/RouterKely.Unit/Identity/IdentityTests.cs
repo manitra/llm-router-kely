@@ -62,6 +62,10 @@ public sealed class IdentityTests
                 new AddKeyMutation(generated.Key),
                 withUser.Version,
                 CancellationToken.None);
+            IdentitySnapshot withUpdate = await provider.ApplyAsync(
+                new UpdateUserMutation(user with { Name = "Renamed", QuotaNanoUsd = 2_000, Enabled = false }),
+                withKey.Version,
+                CancellationToken.None);
 
             string json = await File.ReadAllTextAsync(path);
             Assert.DoesNotContain(generated.Plaintext, json);
@@ -69,9 +73,20 @@ public sealed class IdentityTests
 
             var reloadedProvider = new FileIdentityProvider(path, 10, 20, 1, 1);
             IdentitySnapshot reloaded = await reloadedProvider.LoadAsync(CancellationToken.None);
-            Assert.Equal(withKey.Version, reloaded.Version);
-            Assert.Equal(withKey.Users, reloaded.Users);
-            Assert.Equal(withKey.Keys, reloaded.Keys);
+            Assert.Equal(withUpdate.Version, reloaded.Version);
+            Assert.Equal(withUpdate.Users, reloaded.Users);
+            Assert.Equal(withUpdate.Keys, reloaded.Keys);
+
+            IdentityUser updated = Assert.Single(reloaded.Users);
+            Assert.Equal("Renamed", updated.Name);
+            Assert.Equal(2_000, updated.QuotaNanoUsd);
+            Assert.False(updated.Enabled);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await reloadedProvider.ApplyAsync(
+                    new UpdateUserMutation(user with { Id = 9 }),
+                    reloaded.Version,
+                    CancellationToken.None));
         }
         finally
         {

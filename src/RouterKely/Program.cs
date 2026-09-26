@@ -135,10 +135,9 @@ app.MapGet("/ui/login", ui.LoginPageAsync);
 app.MapPost("/ui/login", ui.LoginAsync);
 app.MapPost("/ui/logout", ui.LogoutAsync);
 app.MapGet("/ui/admin/users", ui.UsersAsync);
+app.MapGet("/ui/admin/users/new", ui.NewUserAsync);
 app.MapGet("/ui/admin/users/{id:long}", ui.UserAsync);
-app.MapPost("/ui/actions/users/create", ui.CreateUserAsync);
-app.MapPost("/ui/actions/users/{id:long}/disable", ui.DisableUserAsync);
-app.MapPost("/ui/actions/users/{id:long}/enable", ui.EnableUserAsync);
+app.MapPost("/ui/actions/users", ui.SaveUserAsync);
 app.MapPost("/ui/actions/users/{id:long}/keys/create", ui.CreateKeyAsync);
 app.MapPost("/ui/actions/keys/{id:long}/revoke", ui.RevokeKeyAsync);
 

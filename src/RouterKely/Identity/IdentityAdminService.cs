@@ -29,10 +29,12 @@ public sealed class IdentityAdminService
 
     public IdentitySnapshot Snapshot => _authenticator.Snapshot;
 
-    public async ValueTask<IdentityUser> CreateUserAsync(
+    public async ValueTask<IdentityUser> SaveUserAsync(
+        long? userId,
         string name,
         string email,
         long? quotaNanoUsd,
+        bool enabled,
         CancellationToken cancellationToken)
     {
         name = name.Trim();
@@ -45,37 +47,29 @@ public sealed class IdentityAdminService
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            if (Snapshot.Users.Any(user => user.Email.Equals(email, StringComparison.OrdinalIgnoreCase)))
+            IdentityUser? existing = userId is null
+                ? null
+                : _fileSnapshot.Users.SingleOrDefault(user => user.Id == userId)
+                    ?? throw new InvalidOperationException("User not found or cannot be changed.");
+
+            if (Snapshot.Users.Any(user => user.Id != existing?.Id &&
+                    user.Email.Equals(email, StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidOperationException("A user with that email already exists.");
 
-            long id = Snapshot.Users.Max(static user => user.Id) + 1;
-            var user = new IdentityUser(id, name, email, IdentityRole.User, true, quotaNanoUsd);
-            await ApplyAsync(new AddUserMutation(user), cancellationToken);
-            _logger.LogInformation("Administrator created user {UserId}", id);
-            return user;
-        }
-        finally
-        {
-            _gate.Release();
-        }
-    }
-
-    public async ValueTask SetUserEnabledAsync(
-        long userId,
-        bool enabled,
-        CancellationToken cancellationToken)
-    {
-        await _gate.WaitAsync(cancellationToken);
-        try
-        {
-            IdentityUser user = _fileSnapshot.Users.SingleOrDefault(user => user.Id == userId)
-                ?? throw new InvalidOperationException("User not found or cannot be changed.");
-            if (!enabled && user.Role == IdentityRole.Admin &&
-                Snapshot.Users.Count(candidate => candidate.Enabled && candidate.Role == IdentityRole.Admin) <= 1)
+            if (existing is { Enabled: true, Role: IdentityRole.Admin } && !enabled &&
+                Snapshot.Users.Count(candidate =>
+                    candidate.Enabled && candidate.Role == IdentityRole.Admin && candidate.Id != existing.Id) == 0)
                 throw new InvalidOperationException("The last enabled administrator cannot be disabled.");
 
-            await ApplyAsync(new SetUserEnabledMutation(userId, enabled), cancellationToken);
-            _logger.LogInformation("Administrator set user {UserId} enabled={Enabled}", userId, enabled);
+            IdentityUser user = existing is null
+                ? new IdentityUser(Snapshot.Users.Max(static user => user.Id) + 1, name, email, IdentityRole.User, enabled, quotaNanoUsd)
+                : existing with { Name = name, Email = email, QuotaNanoUsd = quotaNanoUsd, Enabled = enabled };
+
+            await ApplyAsync(
+                existing is null ? new AddUserMutation(user) : new UpdateUserMutation(user),
+                cancellationToken);
+            _logger.LogInformation("Administrator saved user {UserId}", user.Id);
+            return user;
         }
         finally
         {
