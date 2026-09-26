@@ -107,7 +107,8 @@ var identityAdmin = new IdentityAdminService(
     usage,
     app.Logger);
 var sessions = new UiSessionStore(authenticator);
-var ui = new AdminUiService(authenticator, identityAdmin, sessions);
+var configurations = new ConfigurationAdminService(configPath);
+var ui = new AdminUiService(authenticator, identityAdmin, configurations, sessions, app.Logger);
 
 app.MapGet("/", static () => Results.Text("Router Kely is running. Use /v1 as the OpenAI-compatible base path.\n"));
 app.MapGet("/health/live", static () => Results.Text("{\"status\":\"ok\"}", "application/json"));
@@ -139,6 +140,8 @@ app.MapGet("/ui/admin/users/new", ui.NewUserAsync);
 app.MapGet("/ui/admin/users/{id:long}", ui.UserAsync);
 app.MapPost("/ui/actions/users", ui.SaveUserAsync);
 app.MapPost("/ui/actions/users/{id:long}/keys/create", ui.CreateKeyAsync);
+app.MapGet("/ui/admin/config", ui.ConfigPageAsync);
+app.MapPost("/ui/actions/config", ui.SaveConfigAsync);
 app.MapPost("/ui/actions/keys/{id:long}/revoke", ui.RevokeKeyAsync);
 
 await app.RunAsync();

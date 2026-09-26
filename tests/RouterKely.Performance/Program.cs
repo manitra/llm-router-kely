@@ -442,6 +442,15 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
             !editedListHtml.Contains("Performance User Edited"))
             throw new InvalidOperationException("Admin users list did not show the edited user and its edit link.");
     }
+
+    using (HttpResponseMessage configPage = await client.GetAsync($"{routerUrl}/ui/admin/config"))
+    {
+        EnsureStatus(configPage, HttpStatusCode.OK, "config page");
+        string configHtml = await configPage.Content.ReadAsStringAsync();
+        if (!configHtml.Contains("name=\"listenUrl\"", StringComparison.Ordinal) ||
+            !configHtml.Contains("Changes take effect after restart", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin config page is missing the expected editor fields.");
+    }
 }
 
 static async Task RunConcurrencySmokeAsync(
