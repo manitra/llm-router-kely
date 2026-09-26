@@ -999,6 +999,8 @@ Measured on Linux, release Native AOT, one pinned vCPU, container memory limit 2
 | Steady idle RSS after warm-up | `< 100 MiB` |
 | RSS at 64 concurrent streams | `< 180 MiB` |
 | RSS at 256 concurrent streams | `< 250 MiB` |
+| Native AOT executable size | `<= 20 MiB` |
+| Native AOT publish file count | `1` |
 | Sustained throughput for 1-KiB mock responses | `>= 5,000 req/s` or CPU saturation without queue instability |
 | Auth lookup complexity | O(1) expected |
 | Accounting enqueue/write wait on request path | `0` |
@@ -1036,12 +1038,13 @@ CI compares the candidate with the default branch on the same runner. Fail when:
 - throughput regresses by >5% without an approved explanation;
 - allocation/request grows by >256 B or per-chunk allocation becomes nonzero;
 - RSS grows by >10 MiB or exceeds the hard budget;
+- the Native AOT executable exceeds 20 MiB or its publish directory contains anything other than the single executable;
 - any inference-path state-provider call or file/database I/O appears;
 - Native AOT/trim warnings appear.
 
 Benchmark noise must be controlled with warm-up, CPU affinity where available, repeated samples, and median-of-runs reporting. Store machine/runtime metadata with results.
 
-The default `scripts/tests.sh` run includes a short, concurrency-1 end-to-end smoke benchmark using a local deterministic upstream and the release build. It reports interleaved direct/upstream and routed p50/p95/p99 latency, incremental p50/p95/p99 overhead, and sequential throughput. Results are informational on ordinary developer machines. Setting `ROUTERKELY_PERF_ENFORCE=true` enforces the p50 and p99 incremental latency limits; this mode is intended for controlled CI runners. `ROUTERKELY_PERF_WARMUP` and `ROUTERKELY_PERF_SAMPLES` may increase sample counts without changing the scenario.
+The default `scripts/tests.sh` run publishes and executes the release Native AOT binary in a temporary directory, then runs a short, concurrency-1 end-to-end smoke benchmark against a local deterministic upstream. It prints interleaved direct/upstream and routed p50/p95/p99 latency, incremental p50/p95/p99 overhead, sequential throughput, idle working set after load, executable size, and publish-file count. The `< 100 MiB` idle working-set, `<= 20 MiB` executable-size, and exactly-one-published-file limits are always enforced so local and CI runs cannot silently grow the footprint. Latency results are informational on ordinary developer machines; setting `ROUTERKELY_PERF_ENFORCE=true` also enforces the p50 and p99 incremental latency limits on controlled CI runners. `ROUTERKELY_PERF_WARMUP` and `ROUTERKELY_PERF_SAMPLES` may increase sample counts without changing the scenario.
 
 The harness may set `Upstream.AllowInsecureLoopback=true` only for a loopback HTTP mock. The option never permits plaintext traffic to a non-loopback address and defaults to false.
 

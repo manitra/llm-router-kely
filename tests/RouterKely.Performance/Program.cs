@@ -11,23 +11,29 @@ const string ApiKey = "sk-rk-performance-test";
 const int ResponseBytes = 1_024;
 const int DefaultWarmup = 100;
 const int DefaultSamples = 1_000;
+const long MaxIdleWorkingSetBytes = 100L * 1_024 * 1_024;
+const long MaxBinaryBytes = 20L * 1_024 * 1_024;
+const int ExpectedPublishedFileCount = 1;
 
 CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
 CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
 
-string repositoryRoot = args.Length == 1
+string repositoryRoot = args.Length >= 1
     ? Path.GetFullPath(args[0])
     : FindRepositoryRoot();
-string routerAssembly = Path.Combine(
-    repositoryRoot,
-    "src",
-    "RouterKely",
-    "bin",
-    "Release",
-    "net10.0",
-    "RouterKely.dll");
-if (!File.Exists(routerAssembly))
-    throw new InvalidOperationException($"Build RouterKely first. Missing '{routerAssembly}'.");
+string publishDirectory = args.Length >= 2
+    ? Path.GetFullPath(args[1])
+    : throw new InvalidOperationException("Pass the Native AOT publish directory as the second argument.");
+string routerExecutable = Path.Combine(
+    publishDirectory,
+    OperatingSystem.IsWindows() ? "RouterKely.exe" : "RouterKely");
+if (!File.Exists(routerExecutable))
+    throw new InvalidOperationException($"Publish Router Kely first. Missing '{routerExecutable}'.");
+
+string[] publishedFiles = Directory.GetFiles(publishDirectory, "*", SearchOption.AllDirectories);
+long binaryBytes = new FileInfo(routerExecutable).Length;
+bool fileCountPass = publishedFiles.Length == ExpectedPublishedFileCount;
+bool binarySizePass = binaryBytes <= MaxBinaryBytes;
 
 int warmup = ReadPositiveInteger("ROUTERKELY_PERF_WARMUP", DefaultWarmup);
 int samples = ReadPositiveInteger("ROUTERKELY_PERF_SAMPLES", DefaultSamples);
@@ -57,7 +63,7 @@ try
 {
     mock = await StartMockUpstreamAsync(mockUrl);
     string configurationPath = WriteConfiguration(temporaryDirectory, routerUrl, mockUrl);
-    router = StartRouter(routerAssembly, configurationPath);
+    router = StartRouter(routerExecutable, configurationPath);
 
     using var directClient = CreateClient();
     using var routerClient = CreateClient();
@@ -96,20 +102,30 @@ try
     double overheadP95 = Math.Max(0, routed.P95 - direct.P95);
     double overheadP99 = Math.Max(0, routed.P99 - direct.P99);
     double requestsPerSecond = samples / (routerMilliseconds.Sum() / 1_000d);
+    await Task.Delay(250);
+    router.Refresh();
+    long idleWorkingSetBytes = router.WorkingSet64;
+    bool memoryPass = idleWorkingSetBytes < MaxIdleWorkingSetBytes;
 
     Console.WriteLine();
     Console.WriteLine("Router Kely end-to-end performance smoke");
     Console.WriteLine($"  runtime:    {RuntimeInformation.OSDescription}, {RuntimeInformation.ProcessArchitecture}, .NET {Environment.Version}");
-    Console.WriteLine("  build:      Release framework-dependent smoke; Native AOT certification is separate");
+    Console.WriteLine("  build:      Release Native AOT executable");
     Console.WriteLine($"  scenario:   {samples:N0} interleaved samples, {warmup:N0} warm-up, {ResponseBytes:N0}-byte response, concurrency 1");
     Console.WriteLine($"  direct:     p50 {direct.P50:F3} ms | p95 {direct.P95:F3} ms | p99 {direct.P99:F3} ms");
     Console.WriteLine($"  router:     p50 {routed.P50:F3} ms | p95 {routed.P95:F3} ms | p99 {routed.P99:F3} ms");
     Console.WriteLine($"  overhead:   p50 {overheadP50:F3} ms | p95 {overheadP95:F3} ms | p99 {overheadP99:F3} ms");
     Console.WriteLine($"  throughput: {requestsPerSecond:N0} sequential routed requests/s");
+    Console.WriteLine($"  memory:     {FormatMiB(idleWorkingSetBytes)} MiB idle working set after load | limit < {FormatMiB(MaxIdleWorkingSetBytes)} MiB => {(memoryPass ? "PASS" : "MISS")} (enforced)");
+    Console.WriteLine($"  binary:     {FormatMiB(binaryBytes)} MiB | limit <= {FormatMiB(MaxBinaryBytes)} MiB => {(binarySizePass ? "PASS" : "MISS")} (enforced)");
+    Console.WriteLine($"  files:      {publishedFiles.Length:N0} published | required {ExpectedPublishedFileCount} => {(fileCountPass ? "PASS" : "MISS")} (enforced)");
     Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
 
     await RunAdminUiSmokeAsync(routerUrl);
     Console.WriteLine("  admin UI:   PASS (login, create user/key, authenticate, revoke)");
+
+    if (!memoryPass || !binarySizePass || !fileCountPass)
+        return 1;
 
     if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))
         return 1;
@@ -211,15 +227,14 @@ static string WriteConfiguration(string directory, string routerUrl, string mock
     return path;
 }
 
-static Process StartRouter(string assembly, string configurationPath)
+static Process StartRouter(string executable, string configurationPath)
 {
-    var start = new ProcessStartInfo("dotnet")
+    var start = new ProcessStartInfo(executable)
     {
         RedirectStandardError = true,
         RedirectStandardOutput = true,
         UseShellExecute = false
     };
-    start.ArgumentList.Add(assembly);
     start.Environment["ROUTERKELY_CONFIG"] = configurationPath;
     start.Environment["Logging__LogLevel__Default"] = "Warning";
 
@@ -427,6 +442,9 @@ static int ReadPositiveInteger(string name, int defaultValue)
         ? value
         : defaultValue;
 }
+
+static string FormatMiB(long bytes) =>
+    (bytes / (1_024d * 1_024d)).ToString("F2", CultureInfo.InvariantCulture);
 
 static string FindRepositoryRoot()
 {
