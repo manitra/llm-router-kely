@@ -925,9 +925,9 @@ The repository-root `scripts/container/Dockerfile` builds the certified single-c
 | Ignore rules | `scripts/container/Dockerfile.dockerignore`, applied because BuildKit requires this file to sit next to the Dockerfile and be named after it |
 | Build stage | `mcr.microsoft.com/dotnet/sdk:10.0-alpine` with `clang`, `build-base`, and `zlib-dev` |
 | Publish | `dotnet publish --configuration Release --runtime linux-musl-x64` or `linux-musl-arm64`, selected from `TARGETARCH` |
-| Runtime stage | `mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine` |
-| Process user | uid/gid `1654`, the non-root `app` user the base image provides |
-| Writable path | `/data` only, owned by `1654` with mode `0700`; the root filesystem is expected to be read-only |
+| Runtime stage | `mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine`, plus `su-exec` (65 KiB) to drop privileges |
+| Router process user | uid/gid `1654`, the non-root `app` user the base image provides |
+| Writable path | `/data` only, claimed by the entrypoint and owned by `1654` with mode `0700`; the root filesystem is expected to be read-only |
 | Published port | `8080` |
 | Volume | `/data`, holding the configuration file and the identity file |
 
@@ -948,11 +948,30 @@ Container behavior:
 
 - The entrypoint refuses to start when either secret is missing, because the seeded file contains placeholder values that would otherwise be accepted.
 - On first start the entrypoint copies the template to `ROUTERKELY_CONFIG` with owner-only permissions and reports that the operator should edit it. An existing file is never overwritten, so operator edits survive restarts and redeployments.
-- The volume must be writable by uid `1654`. A named volume inherits the ownership baked into the image; a bind mount MUST be chowned to `1654:1654`. An unwritable volume fails startup with an explicit diagnostic.
+- The image sets no `USER`. The entrypoint starts as root, takes ownership of `ROUTERKELY_CONFIG`'s directory, then re-executes itself as uid `1654` before the router starts, so the router process is always unprivileged. This is required because a bind mount keeps the host directory's ownership, which on Linux is usually root: with a plain `USER 1654` the router could not write the identity file, and the failure is invisible on Docker Desktop because it presents bind mounts as writable regardless of ownership.
+- A named volume inherits the ownership baked into the image, so it needs no preparation. A bind mount is claimed automatically by the root step above. A platform that forces a non-root user skips the claiming step and therefore MUST provide a volume writable by uid `1654`; an unwritable volume fails startup with an explicit diagnostic rather than a bare `mkdir` or `cp` error.
 - The configuration and identity files are read once at startup, so a change requires a container restart. The admin UI rewrites the identity file while the container runs, so it MUST NOT be edited concurrently: either manage users through the UI or stop the container first.
 - TLS is terminated by the platform reverse proxy. The container listener stays plain HTTP on the internal network and MUST NOT be published without TLS in front of it. The process listens on `0.0.0.0`, which the platform proxy requires.
 - On a platform that asks for a build context and a Dockerfile path separately, the context is the repository root and the Dockerfile path is `scripts/container/Dockerfile`.
-- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, resolve of the compose build settings, first-boot seeding, non-root uid, read-only root filesystem, working health check, operator configuration surviving a restart, refusal of an invalid configuration, and the missing-secret and unwritable-volume diagnostics.
+- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, resolve of the compose build settings, first-boot seeding, unprivileged router process, read-only root filesystem, working health check, operator configuration surviving a restart, refusal of an invalid configuration, a root-owned volume being claimed, a named volume needing no preparation, and the missing-secret and unwritable-volume diagnostics. Every check runs on every platform: a root-owned named volume with a marker file reproduces bind-mount ownership on a workstation, because Docker re-initializes an empty named volume from the image and would otherwise mask the behaviour.
+
+### 15.2 Published image
+
+The `container image` workflow publishes the certified deployment unit to GitHub Container Registry, which removes the build toolchain from the production host and makes the deployed binary the artifact CI verified. Deployments SHOULD pull it rather than rebuild from source.
+
+| Property | Value |
+|---|---|
+| Workflow | `.github/workflows/container-image.yml` |
+| Image | `ghcr.io/manitra/llm-router-kely` |
+| Architectures | `linux/amd64` and `linux/arm64`, published as one multi-architecture manifest |
+| Builders | `ubuntu-latest` for amd64 and `ubuntu-24.04-arm` for arm64, one native runner per architecture |
+| Tags | `latest` on the default branch, `sha-<short-commit>` always, and `<major>.<minor>` / `<version>` on `v*` tags |
+| Triggers | Push to `main`, `v*` tags, and manual dispatch. Pull requests do not publish. |
+
+Each architecture MUST be built on a native runner of that architecture. Native AOT cross-compilation is not reliable, and running the amd64 build on an emulated amd64 image crashes the IL compiler, so the amd64 artifact cannot be produced or verified on Apple Silicon. `ubuntu-latest` provides the native amd64 builder, and the `container` CI job independently builds and tests the same Dockerfile on that platform.
+
+Registry changes require no credentials for pulling because the package is public. Deployments SHOULD pin `sha-<short-commit>` or a release tag, never `latest`, so a redeploy is reproducible and rollback is a tag change.
+
 
 ## 16. Security requirements
 
@@ -961,7 +980,7 @@ Container behavior:
 - Never log authorization headers, cookies, request/response bodies, query strings containing secrets, upstream credentials, or generated plaintext keys.
 - Structured logs use numeric user/key IDs, public alias, status class, duration bucket, and request ID only.
 - Optional database adapters use parameterized SQL exclusively and a least-privilege database role.
-- Container runs as a non-root UID, read-only root filesystem, no privilege escalation, and all Linux capabilities dropped. The default provider receives write access only to the directory containing its mounted identity file so atomic replacement is possible.
+- Container runs as a non-root UID, read-only root filesystem, no privilege escalation, and all Linux capabilities dropped. Root is used only inside the entrypoint to claim a host-mounted `/data` directory, and privileges are dropped before the router starts. The provider receives write access only to the directory containing its mounted identity file so atomic replacement is possible.
 - Upstream host is fixed by configuration. Client input cannot select scheme, host, port, or path.
 - Reject request `Content-Encoding` other than absent/identity; decompression bombs are therefore impossible on the request path.
 - Enforce request/header/concurrency limits before expensive work.
@@ -1305,9 +1324,10 @@ Recommended layout:
 /scripts/container-tests.sh     end-to-end container checks
 /scripts/container/Dockerfile   two-stage Alpine image, the certified deployment unit
 /scripts/container/Dockerfile.dockerignore   build-context filter for the Dockerfile
-/scripts/container/entrypoint.sh             first-boot configuration seeding and secret guard
+/scripts/container/entrypoint.sh             volume ownership, first-boot seeding, secret guard
 /scripts/container/healthcheck.sh            readiness probe used by the image health check
 /scripts/container/compose.yml               local run of the same image
+/.github/workflows/container-image.yml       publishes the multi-architecture image to GHCR
 /docs/compatibility
 /plugins/RouterKely.Postgres optional post-MVP adapter; absent from the default build
 ```

@@ -1,10 +1,16 @@
 #!/bin/sh
-# Seeds the persisted configuration on first boot, then starts the router.
-# Runs as the unprivileged "app" user, so the volume must be writable by it: a fresh
-# named volume inherits the ownership baked into the image, while a bind mount has to
-# be chowned to 1654:1654 by the operator.
+# Prepares the persisted /data volume, seeds the configuration on first boot, then
+# starts the router as the unprivileged "app" user.
+#
+# A bind mount keeps the host directory's ownership, which on Linux is usually root and
+# therefore not writable by the runtime user. When the container starts as root this
+# script claims the directory and re-executes itself as uid 1654, so the router and every
+# file it writes belong to the unprivileged user. Named volumes inherit the ownership
+# baked into the image, and platforms that force a non-root user skip the claiming step.
 set -eu
 
+app_uid=1654
+app_gid=1654
 config_path="${ROUTERKELY_CONFIG:-/data/router-kely.local.json}"
 config_dir="$(dirname "$config_path")"
 template_path="${ROUTERKELY_CONFIG_TEMPLATE:-/app/config/router-kely.local.json.example}"
@@ -16,9 +22,18 @@ template_path="${ROUTERKELY_CONFIG_TEMPLATE:-/app/config/router-kely.local.json.
 
 # Report the cause instead of a bare mkdir/cp error when the volume is not writable.
 abort_unwritable() {
-  echo "router-kely: ${1} is not writable by uid $(id -u); chown the mounted volume to 1654:1654." >&2
+  echo "router-kely: ${1} is not writable by uid $(id -u); chown the mounted volume to ${app_uid}:${app_gid}." >&2
   exit 1
 }
+
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p "$config_dir" 2>/dev/null || abort_unwritable "$config_dir"
+  chown "$app_uid:$app_gid" "$config_dir" 2>/dev/null || abort_unwritable "$config_dir"
+  if [ -f "$config_path" ]; then
+    chown "$app_uid:$app_gid" "$config_path" 2>/dev/null || abort_unwritable "$config_path"
+  fi
+  exec su-exec "$app_uid:$app_gid" "$0" "$@"
+fi
 
 mkdir -p "$config_dir" 2>/dev/null || abort_unwritable "$config_dir"
 

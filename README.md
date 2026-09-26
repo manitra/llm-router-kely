@@ -47,9 +47,27 @@ ROUTERKELY_ADMIN_API_KEY=sk-rk_... ROUTERKELY_DEEPSEEK_API_KEY=sk-... \
   docker compose -f scripts/container/compose.yml up --build
 ```
 
+The `container image` workflow publishes a multi-architecture image to GitHub Container Registry on every push to `main` and on `v*` tags. Pulling that image is the fastest deployment: the host downloads 26 MB instead of running a Native AOT compile, and it runs the exact artifact CI verified.
+
+```bash
+docker run -d --name router-kely -p 8080:8080 -v router-kely-data:/data \
+  -e ROUTERKELY_ADMIN_API_KEY=sk-rk_... \
+  -e ROUTERKELY_DEEPSEEK_API_KEY=sk-... \
+  ghcr.io/manitra/llm-router-kely:latest
+```
+
+Pin `:sha-<commit>` or a release tag such as `:1.2.3` for reproducible deployments and easy rollback.
+
 Mount a persistent volume at `/data`. It holds `router-kely.local.json` and the `router-kely.identities.json` the admin UI rewrites. On the first start the container seeds the configuration from the image default; edit it and restart the container to apply changes, or manage users in the admin UI. Secrets live in the environment, never in the volume.
 
-On Coolify: create the app with the **Dockerfile** build pack from this repository, set **Base Directory** to `/` and **Dockerfile Location** to `/scripts/container/Dockerfile`, set the two secret variables, add a volume mount at `/data`, expose port `8080`, and deploy. The first deployment creates the configuration file in the volume for you to edit.
+The entrypoint takes ownership of the volume and then drops to the unprivileged `app` user (uid 1654) before the router starts, so both named volumes and bind mounts work with no host-side preparation. Only a platform that forces a non-root user needs a volume already writable by uid 1654.
+
+On Coolify, either:
+
+- **Dockerfile build pack** — **Base Directory** `/`, **Dockerfile Location** `/scripts/container/Dockerfile`; or
+- **Docker Image build pack** — image `ghcr.io/manitra/llm-router-kely:latest` to deploy the published artifact directly.
+
+In both cases set the two secret variables, add a volume mount at `/data`, expose port `8080`, and deploy. The first deployment creates the configuration file in the volume for you to edit.
 
 ## Maintain
 
