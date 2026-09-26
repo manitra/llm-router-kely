@@ -8,6 +8,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work_dir="$(mktemp -d "$repo_root/scripts/.tmp-container-test.XXXXXX")"
 readonly image="llm-router-kely:container-test"
+readonly probe_image="llm-router-kely:ignore-probe"
 readonly container="routerkely-container-test"
 # One-shot runs that are expected to fail at startup use a separate name so they
 # never collide with the long-running container.
@@ -22,6 +23,7 @@ readonly config_path="$work_dir/router-kely.local.json"
 cleanup() {
   docker rm --force "$container" "$probe" "$named_container" >/dev/null 2>&1 || true
   docker volume rm --force "$named_volume" "$blocked_volume" >/dev/null 2>&1 || true
+  docker rmi --force "$probe_image" >/dev/null 2>&1 || true
   rm -rf -- "$work_dir"
 }
 trap cleanup EXIT
@@ -30,6 +32,13 @@ fail() {
   echo "container test failed: $*" >&2
   exit 1
 }
+
+echo "==> Environment"
+docker version --format '    docker client {{.Client.Version}} / server {{.Server.Version}}' 2>/dev/null ||
+  echo "    docker: unavailable"
+docker compose version 2>/dev/null | sed 's/^/    /' ||
+  echo "    docker compose: unavailable"
+df -h / | sed 's/^/    /'
 
 container_env() {
   docker run "$@" \
@@ -97,18 +106,23 @@ assert_build_context_is_filtered() {
   if [[ ! -f "$ignore_file" ]]; then
     fail "$ignore_file is missing, so BuildKit would send bin/, obj/, and local secrets as build context"
   fi
+  # Reuse the base the real build pulls anyway. Pulling a separate image from Docker Hub
+  # would make this check, and therefore CI, depend on a rate-limited public registry.
+  local probe_base
+  probe_base="$(sed -n 's/^FROM \(.*\) AS runtime$/\1/p' "$repo_root/scripts/container/Dockerfile" | head -1)"
+  [[ -n "$probe_base" ]] || fail "could not read the runtime base image from the Dockerfile"
   mkdir -p "$probe_dir/ctx/src/RouterKely/obj" "$probe_dir/ctx/.git" \
     "$probe_dir/ctx/config" "$probe_dir/ctx/scripts"
   cp "$ignore_file" "$probe_dir/Dockerfile.dockerignore"
-  cat > "$probe_dir/Dockerfile" <<'DOCKERFILE'
-FROM alpine:3.20
+  cat > "$probe_dir/Dockerfile" <<DOCKERFILE
+FROM ${probe_base}
 COPY . /ctx
-RUN set -eu; \
-    for leaked in src/RouterKely/obj/compiled.bin .git/index config/router-kely.local.json scripts/.tmp-run.log; do \
-      if [ -e "/ctx/${leaked}" ]; then echo "leaked into context: ${leaked}" >&2; exit 1; fi; \
-    done; \
-    for kept in scripts/tests.sh config/router-kely.local.json.example; do \
-      if [ ! -e "/ctx/${kept}" ]; then echo "wrongly excluded: ${kept}" >&2; exit 1; fi; \
+RUN set -eu; \\
+    for leaked in src/RouterKely/obj/compiled.bin .git/index config/router-kely.local.json scripts/.tmp-run.log; do \\
+      if [ -e "/ctx/\${leaked}" ]; then echo "leaked into context: \${leaked}" >&2; exit 1; fi; \\
+    done; \\
+    for kept in scripts/tests.sh config/router-kely.local.json.example; do \\
+      if [ ! -e "/ctx/\${kept}" ]; then echo "wrongly excluded: \${kept}" >&2; exit 1; fi; \\
     done
 DOCKERFILE
   touch "$probe_dir/ctx/src/RouterKely/obj/compiled.bin" \
@@ -117,18 +131,28 @@ DOCKERFILE
     "$probe_dir/ctx/config/router-kely.local.json.example" \
     "$probe_dir/ctx/scripts/.tmp-run.log" \
     "$probe_dir/ctx/scripts/tests.sh"
-  docker build --quiet --file "$probe_dir/Dockerfile" "$probe_dir/ctx" >/dev/null ||
+  if ! docker build --file "$probe_dir/Dockerfile" --tag "$probe_image" "$probe_dir/ctx" \
+      >"$work_dir/ignore-probe.log" 2>&1; then
+    cat "$work_dir/ignore-probe.log" >&2
     fail "the ignore rules in Dockerfile.dockerignore are not applied correctly"
+  fi
 }
 
 # Coolify needs the repository root as the build context, because the Dockerfile
 # reads the sources, the configuration template, and the entrypoint scripts.
 assert_compose_build_context() {
   echo "==> Asserting the compose file builds the relocated Dockerfile from the repo root"
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "    note: docker compose is unavailable; compose build settings check skipped"
+    return 0
+  fi
   local resolved
-  resolved="$(ROUTERKELY_ADMIN_API_KEY=probe ROUTERKELY_DEEPSEEK_API_KEY=probe \
-    docker compose --file "$repo_root/scripts/container/compose.yml" config 2>/dev/null)" ||
+  if ! resolved="$(ROUTERKELY_ADMIN_API_KEY=probe ROUTERKELY_DEEPSEEK_API_KEY=probe \
+      docker compose --file "$repo_root/scripts/container/compose.yml" config \
+      2>"$work_dir/compose.stderr")"; then
+    cat "$work_dir/compose.stderr" >&2
     fail "the compose file is not valid"
+  fi
   grep -qE "dockerfile: .*scripts/container/Dockerfile" <<< "$resolved" ||
     fail "the compose file does not resolve the Dockerfile path"
   grep -q "context: $repo_root" <<< "$resolved" ||
