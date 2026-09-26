@@ -45,6 +45,14 @@ public sealed class RouterConfiguration
 
     public int MaxModelPrefixBytes { get; init; } = 65_536;
 
+    public int? MaxConcurrentRequests { get; init; }
+
+    public int? MaxConcurrentRequestsPerUser { get; init; }
+
+    internal int EffectiveMaxConcurrentRequests => MaxConcurrentRequests ?? 256;
+
+    internal int EffectiveMaxConcurrentRequestsPerUser => MaxConcurrentRequestsPerUser ?? 32;
+
     internal void ApplyEnvironmentOverrides()
     {
         Identity ??= new IdentityConfiguration();
@@ -92,6 +100,12 @@ public sealed class RouterConfiguration
             throw new InvalidOperationException("MaxModelPrefixBytes must be between 1 and 1048576.");
         if (MaxRequestBodyBytes < MaxModelPrefixBytes)
             throw new InvalidOperationException("MaxRequestBodyBytes must be greater than or equal to MaxModelPrefixBytes.");
+        if (EffectiveMaxConcurrentRequests is < 1 or > 10_000)
+            throw new InvalidOperationException("MaxConcurrentRequests must be between 1 and 10000.");
+        if (EffectiveMaxConcurrentRequestsPerUser is < 1 ||
+            EffectiveMaxConcurrentRequestsPerUser > EffectiveMaxConcurrentRequests)
+            throw new InvalidOperationException(
+                "MaxConcurrentRequestsPerUser must be between 1 and MaxConcurrentRequests.");
         Statistics.Validate();
     }
 }

@@ -12,8 +12,13 @@ namespace RouterKely.Ui;
 
 public sealed class AdminUiService
 {
+    public const string StylesheetPath = "/ui/assets/pico.classless-2.1.1.min.css";
+
+    private const string StylesheetResourceName = "RouterKely.Ui.pico.classless-2.1.1.min.css";
+    private const string StylesheetEtag = "\"sha256-61207a40ffc02a42d1e50143651c121beab70ed413c934c1ff84fa263ba436b0\"";
     private const string CrossOriginMessage = "Request rejected: it did not originate from this site. Open the UI directly and retry.";
     private const string RateLimitedMessage = "Too many sign-in attempts. Try again later.";
+    private static readonly byte[] Stylesheet = LoadStylesheet();
 
     private readonly ApiKeyAuthenticator _authenticator;
     private readonly IdentityAdminService _identities;
@@ -34,6 +39,22 @@ public sealed class AdminUiService
     {
         context.Response.Redirect("/ui/admin/users");
         return Task.CompletedTask;
+    }
+
+    public static Task StylesheetAsync(HttpContext context)
+    {
+        if (context.Request.Headers.IfNoneMatch == StylesheetEtag)
+        {
+            context.Response.StatusCode = StatusCodes.Status304NotModified;
+            return Task.CompletedTask;
+        }
+
+        context.Response.ContentType = "text/css; charset=utf-8";
+        context.Response.ContentLength = Stylesheet.Length;
+        context.Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+        context.Response.Headers.ETag = StylesheetEtag;
+        context.Response.Headers.XContentTypeOptions = "nosniff";
+        return context.Response.Body.WriteAsync(Stylesheet, context.RequestAborted).AsTask();
     }
 
     public Task LoginPageAsync(HttpContext context) => WritePageAsync(
@@ -344,16 +365,23 @@ public sealed class AdminUiService
     {
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+        context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers["Referrer-Policy"] = "same-origin";
         string html = $$"""
-            <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-            <title>{{Encode(title)}}</title><style>
-            body{font:16px system-ui;max-width:900px;margin:3rem auto;padding:0 1rem;color:#171717}table{border-collapse:collapse;width:100%}th,td{padding:.6rem;border-bottom:1px solid #ddd;text-align:left}form{margin:1rem 0}label{display:block;margin:.6rem 0}input{padding:.45rem;min-width:20rem}button{padding:.45rem .8rem}pre,code{background:#f3f3f3;padding:.3rem;overflow-wrap:anywhere}
-            </style></head><body>{{body}}</body></html>
+            <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+            <title>{{Encode(title)}}</title><link rel="stylesheet" href="{{StylesheetPath}}"></head><body><main>{{body}}</main></body></html>
             """;
         return context.Response.WriteAsync(html, context.RequestAborted);
+    }
+
+    private static byte[] LoadStylesheet()
+    {
+        using Stream stream = typeof(AdminUiService).Assembly.GetManifestResourceStream(StylesheetResourceName)
+            ?? throw new InvalidOperationException($"Missing embedded resource '{StylesheetResourceName}'.");
+        var stylesheet = new byte[stream.Length];
+        stream.ReadExactly(stylesheet);
+        return stylesheet;
     }
 
     private sealed class LoginRateLimiter

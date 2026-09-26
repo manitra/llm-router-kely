@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using RouterKely.Compatibility;
 using RouterKely.Configuration;
@@ -25,7 +26,7 @@ var handler = new SocketsHttpHandler
     UseCookies = false,
     PooledConnectionLifetime = TimeSpan.FromMinutes(15),
     PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
-    MaxConnectionsPerServer = 256,
+    MaxConnectionsPerServer = configuration.EffectiveMaxConcurrentRequests,
     ConnectTimeout = TimeSpan.FromSeconds(5)
 };
 
@@ -71,7 +72,10 @@ var authenticator = new ApiKeyAuthenticator(
 var statistics = new InMemoryStatisticsProvider(
     configuration.Statistics.HourlyRetentionHours,
     configuration.Statistics.DailyRetentionDays);
-var usage = new UsageAccumulator(routes, authenticator.Snapshot);
+var usage = new UsageAccumulator(
+    routes,
+    authenticator.Snapshot,
+    configuration.EffectiveMaxConcurrentRequestsPerUser);
 var proxy = new ProxyService(
     authenticator,
     client,
@@ -81,6 +85,7 @@ var proxy = new ProxyService(
     configuration.Upstream.ApiKey,
     routes,
     usage,
+    configuration.EffectiveMaxConcurrentRequests,
     configuration.MaxRequestBodyBytes,
     configuration.MaxModelPrefixBytes);
 var compatibility = new CompatibilityService(
@@ -107,6 +112,15 @@ var ui = new AdminUiService(authenticator, identityAdmin, sessions);
 app.MapGet("/", static () => Results.Text("Router Kely is running. Use /v1 as the OpenAI-compatible base path.\n"));
 app.MapGet("/health/live", static () => Results.Text("{\"status\":\"ok\"}", "application/json"));
 app.MapGet("/health/ready", static () => Results.Text("{\"status\":\"ready\"}", "application/json"));
+if (string.Equals(
+        Environment.GetEnvironmentVariable("ROUTERKELY_BENCHMARK_METRICS"),
+        "true",
+        StringComparison.OrdinalIgnoreCase))
+{
+    app.MapGet(
+        "/internal/benchmark/allocated-bytes",
+        static () => GC.GetTotalAllocatedBytes(true).ToString(CultureInfo.InvariantCulture));
+}
 app.MapGet("/v1/models", proxy.WriteModelsAsync);
 app.MapGet("/models", proxy.WriteModelsAsync);
 app.MapGet("/v1/model/info", compatibility.WriteModelInfoAsync);
@@ -116,6 +130,7 @@ app.MapGet("/user/daily/activity", compatibility.WriteDailyActivityAsync);
 app.MapPost("/v1/chat/completions", proxy.ProxyChatCompletionsAsync);
 app.MapPost("/chat/completions", proxy.ProxyChatCompletionsAsync);
 app.MapGet("/ui", ui.RootAsync);
+app.MapGet(AdminUiService.StylesheetPath, AdminUiService.StylesheetAsync);
 app.MapGet("/ui/login", ui.LoginPageAsync);
 app.MapPost("/ui/login", ui.LoginAsync);
 app.MapPost("/ui/logout", ui.LogoutAsync);

@@ -16,4 +16,10 @@
   <ItemGroup>
     <ProjectReference Include="../RouterKely.Core/RouterKely.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource
+      Include="Ui/Assets/pico.classless-2.1.1.min.css"
+      LogicalName="RouterKely.Ui.pico.classless-2.1.1.min.css" />
+  </ItemGroup>
 </Project>

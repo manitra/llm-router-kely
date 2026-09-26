@@ -66,7 +66,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Optional persistence | A later PostgreSQL adapter may own identity, statistics, or both. It is not part of the default executable or MVP dependency graph. |
 | Provider boundary | Narrow startup/control-plane ports selected at build/startup; no dynamic assembly loading, reflection discovery, or provider call on an inference request. |
 | Quota strictness | Soft admission limit based on confirmed local usage; explicitly bounded concurrent overshoot and explicit default-provider restart-reset semantics. |
-| UI | Server-rendered HTML at `/ui`; no SPA framework, Node.js, or frontend build pipeline. |
+| UI | Server-rendered HTML at `/ui`, styled with the vendored Pico CSS 2.1.1 classless build; no SPA framework, Node.js, or frontend build pipeline. |
 | UI authentication | Existing Router Kely API key exchanged for a short-lived in-memory browser session. No passwords in Router Kely. |
 | ORM | None. A future PostgreSQL adapter uses Npgsql and explicit SQL. |
 | Cache/broker | None. No Redis, message broker, or worker service. |
@@ -442,6 +442,8 @@ All browser UI routes live under `/ui`:
 | `/ui/admin/usage` | System totals and per-user/model aggregates. |
 
 The look and route placement SHOULD feel familiar to LiteLLM users, but pixel/API parity is not a goal. The UI must work without JavaScript for primary operations. Small progressive-enhancement JavaScript embedded in the executable is allowed.
+
+The UI uses the pinned Pico CSS 2.1.1 classless build. Its minified stylesheet is vendored as an embedded resource and served from the immutable, versioned same-origin path `/ui/assets/pico.classless-2.1.1.min.css`; browsers never fetch UI code, styles, fonts, or analytics from a third party. The HTML shell uses a direct `<main>` child of `<body>` so Pico provides the centered responsive container without framework-specific classes.
 
 The initial administration UI is intentionally one server-rendered users table plus one user-detail page. “Remove user” means disable the user; “remove key” means revoke the key. Neither operation physically deletes identity history. The user-detail page generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
 
@@ -851,12 +853,10 @@ Example:
         "OutputNanoUsdPerMillion": 0
       }
     ],
-    "Limits": {
-      "MaxRequestBodyBytes": 33554432,
-      "MaxModelPrefixBytes": 65536,
-      "MaxConcurrentRequests": 256,
-      "MaxConcurrentRequestsPerUser": 32
-    },
+    "MaxRequestBodyBytes": 33554432,
+    "MaxModelPrefixBytes": 65536,
+    "MaxConcurrentRequests": 256,
+    "MaxConcurrentRequestsPerUser": 32,
     "Statistics": {
       "Provider": "memory",
       "HourlyRetentionHours": 72,
@@ -918,7 +918,7 @@ The environment administrator is merged into this document in memory after valid
 - Upstream host is fixed by configuration. Client input cannot select scheme, host, port, or path.
 - Reject request `Content-Encoding` other than absent/identity; decompression bombs are therefore impossible on the request path.
 - Enforce request/header/concurrency limits before expensive work.
-- UI renders all user-supplied names/emails with HTML escaping and sets a restrictive CSP; no inline third-party scripts, fonts, or analytics.
+- UI renders all user-supplied names/emails with HTML escaping and sets a restrictive CSP; styles load only from the same origin, with no inline styles or third-party scripts, fonts, analytics, or assets.
 - UI cookies are `Secure`, `HttpOnly`, and `SameSite=Strict`. State changes require CSRF defense.
 - Key creation, revocation, user/role/quota/status changes, and bootstrap actions emit structured security audit events. The default provider relies on the external log sink for retention; it does not maintain a second audit store.
 - At least one enabled admin must remain. Demoting/disabling the last enabled admin is rejected atomically.
@@ -1005,6 +1005,7 @@ Measured on Linux, release Native AOT, one pinned vCPU, container memory limit 2
 | Auth lookup complexity | O(1) expected |
 | Accounting enqueue/write wait on request path | `0` |
 | Allocations while forwarding each additional response chunk | `0 B` target; regression requires justification |
+| Process allocations per routed 1-KiB non-stream request | `<= 8 KiB` |
 | Gen 2 collections during 10-minute 64-stream test | `0` target |
 
 “Incremental proxy latency” is the gateway result minus the direct-to-mock-upstream baseline collected in the same run, using an interleaved test to remove scheduler/network drift. It excludes DeepSeek WAN/model time. The sub-millisecond claim MUST always be stated with this definition.
@@ -1037,6 +1038,7 @@ CI compares the candidate with the default branch on the same runner. Fail when:
 - p99 incremental overhead exceeds 1 ms or regresses by >10%;
 - throughput regresses by >5% without an approved explanation;
 - allocation/request grows by >256 B or per-chunk allocation becomes nonzero;
+- process allocation exceeds 8 KiB per routed request in the default smoke scenario;
 - RSS grows by >10 MiB or exceeds the hard budget;
 - the Native AOT executable exceeds 20 MiB or its publish directory contains anything other than the single executable;
 - any inference-path state-provider call or file/database I/O appears;
@@ -1044,7 +1046,7 @@ CI compares the candidate with the default branch on the same runner. Fail when:
 
 Benchmark noise must be controlled with warm-up, CPU affinity where available, repeated samples, and median-of-runs reporting. Store machine/runtime metadata with results.
 
-The default `scripts/tests.sh` run publishes and executes the release Native AOT binary in a temporary directory, then runs a short, concurrency-1 end-to-end smoke benchmark against a local deterministic upstream. It prints interleaved direct/upstream and routed p50/p95/p99 latency, incremental p50/p95/p99 overhead, sequential throughput, idle working set after load, executable size, and publish-file count. The `< 100 MiB` idle working-set, `<= 20 MiB` executable-size, and exactly-one-published-file limits are always enforced so local and CI runs cannot silently grow the footprint. Latency results are informational on ordinary developer machines; setting `ROUTERKELY_PERF_ENFORCE=true` also enforces the p50 and p99 incremental latency limits on controlled CI runners. `ROUTERKELY_PERF_WARMUP` and `ROUTERKELY_PERF_SAMPLES` may increase sample counts without changing the scenario.
+The default `scripts/tests.sh` run publishes and executes the release Native AOT binary in a temporary directory, then runs a short, concurrency-1 end-to-end smoke benchmark against a local deterministic upstream. It prints interleaved direct/upstream and routed p50/p95/p99 latency, incremental p50/p95/p99 overhead, sequential throughput, process-wide allocated bytes per routed request, idle working set after load, executable size, and publish-file count. The `<= 8 KiB/request` allocation, `< 100 MiB` idle working-set, `<= 20 MiB` executable-size, and exactly-one-published-file limits are always enforced so local and CI runs cannot silently grow the footprint. The harness enables `ROUTERKELY_BENCHMARK_METRICS=true`, which conditionally exposes `/internal/benchmark/allocated-bytes`; production deployments MUST NOT enable it. The smoke also verifies that per-user concurrency saturation rejects immediately without queueing. Latency results are informational on ordinary developer machines; setting `ROUTERKELY_PERF_ENFORCE=true` also enforces the p50 and p99 incremental latency limits on controlled CI runners. `ROUTERKELY_PERF_WARMUP` and `ROUTERKELY_PERF_SAMPLES` may increase sample counts without changing the scenario.
 
 The harness may set `Upstream.AllowInsecureLoopback=true` only for a loopback HTTP mock. The option never permits plaintext traffic to a non-loopback address and defaults to false.
 

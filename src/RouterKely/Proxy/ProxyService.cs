@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Diagnostics;
 using System.Text.Json;
 using RouterKely.Core.Authentication;
+using RouterKely.Core.Concurrency;
 using RouterKely.Core.Routing;
 using RouterKely.Core.Statistics;
 
@@ -17,6 +18,7 @@ public sealed class ProxyService
     private readonly string _upstreamApiKey;
     private readonly ModelRoute[] _routes;
     private readonly UsageAccumulator _usage;
+    private readonly ConcurrencyLimiter _concurrency;
     private readonly int _maxRequestBodyBytes;
     private readonly int _maxModelPrefixBytes;
 
@@ -27,6 +29,7 @@ public sealed class ProxyService
         string upstreamApiKey,
         ModelRoute[] routes,
         UsageAccumulator usage,
+        int maxConcurrentRequests,
         int maxRequestBodyBytes,
         int maxModelPrefixBytes)
     {
@@ -36,6 +39,7 @@ public sealed class ProxyService
         _upstreamApiKey = upstreamApiKey;
         _routes = routes;
         _usage = usage;
+        _concurrency = new ConcurrencyLimiter(maxConcurrentRequests);
         _maxRequestBodyBytes = maxRequestBodyBytes;
         _maxModelPrefixBytes = maxModelPrefixBytes;
     }
@@ -111,6 +115,32 @@ public sealed class ProxyService
             return;
         }
 
+        if (!_concurrency.TryAcquire())
+        {
+            await WriteErrorAsync(context, 429, "too_many_requests", "Process concurrency limit reached.");
+            return;
+        }
+
+        if (!account.Concurrency.TryAcquire())
+        {
+            _concurrency.Release();
+            await WriteErrorAsync(context, 429, "too_many_requests", "User concurrency limit reached.");
+            return;
+        }
+
+        try
+        {
+            await ProxyAdmittedAsync(context, account, contentType);
+        }
+        finally
+        {
+            account.Concurrency.Release();
+            _concurrency.Release();
+        }
+    }
+
+    private async Task ProxyAdmittedAsync(HttpContext context, UsageAccount account, string contentType)
+    {
         ModelRewritingContent? content = await CreateContentAsync(context);
         if (content is null)
             return;

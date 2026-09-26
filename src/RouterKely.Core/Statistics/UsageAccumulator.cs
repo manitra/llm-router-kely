@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using RouterKely.Core.Concurrency;
 using RouterKely.Core.Identity;
 using RouterKely.Core.Routing;
 
@@ -10,15 +11,22 @@ public sealed class UsageAccumulator
     private readonly object _gate = new();
     private readonly ModelRoute[] _routes;
     private readonly Dictionary<long, DailyQuotaCounter> _quotas = [];
+    private readonly Dictionary<long, ConcurrencyLimiter> _concurrencyLimiters = [];
     private readonly Dictionary<long, UsageAccount> _allAccounts = [];
     private FrozenDictionary<long, UsageAccount> _activeAccounts = FrozenDictionary<long, UsageAccount>.Empty;
     private UsageAccount[] _accountSnapshot = [];
 
-    public UsageAccumulator(ModelRoute[] routes, IdentitySnapshot identities)
+    public UsageAccumulator(
+        ModelRoute[] routes,
+        IdentitySnapshot identities,
+        int maxConcurrentRequestsPerUser = 32)
     {
         _routes = routes;
+        MaxConcurrentRequestsPerUser = maxConcurrentRequestsPerUser;
         UpdateIdentities(identities);
     }
+
+    private int MaxConcurrentRequestsPerUser { get; }
 
     public bool TryGetAccount(long keyId, out UsageAccount? account) =>
         Volatile.Read(ref _activeAccounts).TryGetValue(keyId, out account);
@@ -29,6 +37,9 @@ public sealed class UsageAccumulator
         {
             foreach (IdentityUser user in identities.Users)
             {
+                if (!_concurrencyLimiters.ContainsKey(user.Id))
+                    _concurrencyLimiters.Add(user.Id, new ConcurrencyLimiter(MaxConcurrentRequestsPerUser));
+
                 if (!_quotas.TryGetValue(user.Id, out DailyQuotaCounter? quota))
                 {
                     quota = new DailyQuotaCounter(user.QuotaNanoUsd);
@@ -52,6 +63,7 @@ public sealed class UsageAccumulator
                         user.Id,
                         key.Id,
                         _quotas[user.Id],
+                        _concurrencyLimiters[user.Id],
                         _routes.Length,
                         OutcomeCount);
                     _allAccounts.Add(key.Id, account);
@@ -90,6 +102,7 @@ public sealed class UsageAccount
         long userId,
         long keyId,
         DailyQuotaCounter quota,
+        ConcurrencyLimiter concurrency,
         int routeCount,
         int outcomeCount)
     {
@@ -97,12 +110,15 @@ public sealed class UsageAccount
         _keyId = keyId;
         _outcomeCount = outcomeCount;
         Quota = quota;
+        Concurrency = concurrency;
         _counters = Enumerable.Range(0, routeCount * outcomeCount)
             .Select(static _ => new UsageCounters())
             .ToArray();
     }
 
     public DailyQuotaCounter Quota { get; }
+
+    public ConcurrencyLimiter Concurrency { get; }
 
     public void Record(
         ModelRoute route,

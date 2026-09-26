@@ -44,6 +44,8 @@
       "dailyRetentionDays": 7
     },
     "maxRequestBodyBytes": 33554432,
-    "maxModelPrefixBytes": 65536
+    "maxModelPrefixBytes": 65536,
+    "maxConcurrentRequests": 256,
+    "maxConcurrentRequestsPerUser": 32
   }
 }

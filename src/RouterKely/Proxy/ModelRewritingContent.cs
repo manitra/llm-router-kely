@@ -7,11 +7,10 @@ namespace RouterKely.Proxy;
 internal sealed class ModelRewritingContent : HttpContent
 {
     private readonly Stream _source;
-    private readonly byte[] _prefix;
+    private byte[]? _prefix;
     private readonly int _prefixLength;
     private readonly ModelRewrite _rewrite;
     private readonly int _maxBodyBytes;
-    private bool _disposed;
 
     public ModelRewritingContent(
         Stream source,
@@ -40,17 +39,26 @@ internal sealed class ModelRewritingContent : HttpContent
 
     private async Task SerializeToStreamAsync(Stream stream, CancellationToken cancellationToken)
     {
-        await stream.WriteAsync(
-            _prefix.AsMemory(0, _rewrite.ValueStart),
-            cancellationToken).ConfigureAwait(false);
-        await stream.WriteAsync(
-            _rewrite.Route.ReplacementJsonUtf8,
-            cancellationToken).ConfigureAwait(false);
+        byte[] prefix = _prefix
+            ?? throw new InvalidOperationException("Request content cannot be serialized more than once.");
+        try
+        {
+            await stream.WriteAsync(
+                prefix.AsMemory(0, _rewrite.ValueStart),
+                cancellationToken).ConfigureAwait(false);
+            await stream.WriteAsync(
+                _rewrite.Route.ReplacementJsonUtf8,
+                cancellationToken).ConfigureAwait(false);
 
-        int suffixStart = _rewrite.ValueStart + _rewrite.ValueLength;
-        await stream.WriteAsync(
-            _prefix.AsMemory(suffixStart, _prefixLength - suffixStart),
-            cancellationToken).ConfigureAwait(false);
+            int suffixStart = _rewrite.ValueStart + _rewrite.ValueLength;
+            await stream.WriteAsync(
+                prefix.AsMemory(suffixStart, _prefixLength - suffixStart),
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReturnPrefix();
+        }
 
         byte[] buffer = ArrayPool<byte>.Shared.Rent(16_384);
         long totalBytes = _prefixLength;
@@ -83,13 +91,15 @@ internal sealed class ModelRewritingContent : HttpContent
 
     protected override void Dispose(bool disposing)
     {
-        if (!_disposed)
-        {
-            ArrayPool<byte>.Shared.Return(_prefix);
-            _disposed = true;
-        }
-
+        ReturnPrefix();
         base.Dispose(disposing);
+    }
+
+    private void ReturnPrefix()
+    {
+        byte[]? prefix = Interlocked.Exchange(ref _prefix, null);
+        if (prefix is not null)
+            ArrayPool<byte>.Shared.Return(prefix);
     }
 }
 

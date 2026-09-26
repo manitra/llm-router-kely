@@ -8,11 +8,13 @@ using System.Text;
 using System.Text.Json;
 
 const string ApiKey = "sk-rk-performance-test";
+const string AdminUiStylesheetPath = "/ui/assets/pico.classless-2.1.1.min.css";
 const int ResponseBytes = 1_024;
 const int DefaultWarmup = 100;
 const int DefaultSamples = 1_000;
 const long MaxIdleWorkingSetBytes = 100L * 1_024 * 1_024;
 const long MaxBinaryBytes = 20L * 1_024 * 1_024;
+const double MaxAllocatedBytesPerRequest = 8 * 1_024;
 const int ExpectedPublishedFileCount = 1;
 
 CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -59,26 +61,31 @@ Directory.CreateDirectory(temporaryDirectory);
 
 WebApplication? mock = null;
 Process? router = null;
+var slowRequest = new SlowRequestGate();
 try
 {
-    mock = await StartMockUpstreamAsync(mockUrl);
+    mock = await StartMockUpstreamAsync(mockUrl, slowRequest);
     string configurationPath = WriteConfiguration(temporaryDirectory, routerUrl, mockUrl);
     router = StartRouter(routerExecutable, configurationPath);
 
     using var directClient = CreateClient();
     using var routerClient = CreateClient();
+    using var concurrencyClient = CreateClient(maxConnectionsPerServer: 2);
     var directEndpoint = new Uri($"{mockUrl}/v1/chat/completions");
     var routerEndpoint = new Uri($"{routerUrl}/v1/chat/completions");
     byte[] directRequest = "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"u8.ToArray();
     byte[] routerRequest = "{\"model\":\"perf\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"u8.ToArray();
 
     await WaitUntilReadyAsync(routerClient, new Uri($"{routerUrl}/health/ready"), router);
+    var allocationEndpoint = new Uri($"{routerUrl}/internal/benchmark/allocated-bytes");
 
     for (int index = 0; index < warmup; index++)
     {
         await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
         await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
     }
+    _ = await ReadAllocatedBytesAsync(routerClient, allocationEndpoint);
+    long allocatedBytesBefore = await ReadAllocatedBytesAsync(routerClient, allocationEndpoint);
 
     var directMilliseconds = new double[samples];
     var routerMilliseconds = new double[samples];
@@ -102,6 +109,9 @@ try
     double overheadP95 = Math.Max(0, routed.P95 - direct.P95);
     double overheadP99 = Math.Max(0, routed.P99 - direct.P99);
     double requestsPerSecond = samples / (routerMilliseconds.Sum() / 1_000d);
+    long allocatedBytes = await ReadAllocatedBytesAsync(routerClient, allocationEndpoint) - allocatedBytesBefore;
+    double allocatedBytesPerRequest = (double)allocatedBytes / samples;
+    bool allocationPass = allocatedBytesPerRequest <= MaxAllocatedBytesPerRequest;
     await Task.Delay(250);
     router.Refresh();
     long idleWorkingSetBytes = router.WorkingSet64;
@@ -116,6 +126,7 @@ try
     Console.WriteLine($"  router:     p50 {routed.P50:F3} ms | p95 {routed.P95:F3} ms | p99 {routed.P99:F3} ms");
     Console.WriteLine($"  overhead:   p50 {overheadP50:F3} ms | p95 {overheadP95:F3} ms | p99 {overheadP99:F3} ms");
     Console.WriteLine($"  throughput: {requestsPerSecond:N0} sequential routed requests/s");
+    Console.WriteLine($"  allocation: {allocatedBytesPerRequest:N0} B/routed request | limit <= {MaxAllocatedBytesPerRequest:N0} B => {(allocationPass ? "PASS" : "MISS")} (enforced)");
     Console.WriteLine($"  memory:     {FormatMiB(idleWorkingSetBytes)} MiB idle working set after load | limit < {FormatMiB(MaxIdleWorkingSetBytes)} MiB => {(memoryPass ? "PASS" : "MISS")} (enforced)");
     Console.WriteLine($"  binary:     {FormatMiB(binaryBytes)} MiB | limit <= {FormatMiB(MaxBinaryBytes)} MiB => {(binarySizePass ? "PASS" : "MISS")} (enforced)");
     Console.WriteLine($"  files:      {publishedFiles.Length:N0} published | required {ExpectedPublishedFileCount} => {(fileCountPass ? "PASS" : "MISS")} (enforced)");
@@ -123,8 +134,10 @@ try
 
     await RunAdminUiSmokeAsync(routerUrl);
     Console.WriteLine("  admin UI:   PASS (login, create user/key, authenticate, revoke)");
+    await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, slowRequest);
+    Console.WriteLine("  concurrency: PASS (per-user limit rejects immediately without queueing)");
 
-    if (!memoryPass || !binarySizePass || !fileCountPass)
+    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass)
         return 1;
 
     if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))
@@ -151,7 +164,7 @@ finally
 
 return 0;
 
-static async Task<WebApplication> StartMockUpstreamAsync(string url)
+static async Task<WebApplication> StartMockUpstreamAsync(string url, SlowRequestGate slowRequest)
 {
     WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
     builder.Logging.ClearProviders();
@@ -162,6 +175,11 @@ static async Task<WebApplication> StartMockUpstreamAsync(string url)
     app.MapPost("/v1/chat/completions", async context =>
     {
         await context.Request.Body.CopyToAsync(Stream.Null, context.RequestAborted);
+        if (context.Request.Headers.Accept == "application/x-router-kely-hold")
+        {
+            slowRequest.Started.TrySetResult();
+            await slowRequest.Release.Task.WaitAsync(context.RequestAborted);
+        }
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "application/json";
         context.Response.ContentLength = response.Length;
@@ -219,7 +237,9 @@ static string WriteConfiguration(string directory, string routerUrl, string mock
                 dailyRetentionDays = 7
             },
             maxRequestBodyBytes = 33_554_432,
-            maxModelPrefixBytes = 65_536
+            maxModelPrefixBytes = 65_536,
+            maxConcurrentRequests = 2,
+            maxConcurrentRequestsPerUser = 1
         }
     };
 
@@ -236,22 +256,33 @@ static Process StartRouter(string executable, string configurationPath)
         UseShellExecute = false
     };
     start.Environment["ROUTERKELY_CONFIG"] = configurationPath;
+    start.Environment["ROUTERKELY_BENCHMARK_METRICS"] = "true";
     start.Environment["Logging__LogLevel__Default"] = "Warning";
 
     Process process = Process.Start(start)
         ?? throw new InvalidOperationException("Failed to start Router Kely.");
+    process.OutputDataReceived += static (_, eventArgs) =>
+    {
+        if (eventArgs.Data is not null)
+            Console.WriteLine($"  router: {eventArgs.Data}");
+    };
+    process.ErrorDataReceived += static (_, eventArgs) =>
+    {
+        if (eventArgs.Data is not null)
+            Console.Error.WriteLine($"  router: {eventArgs.Data}");
+    };
     process.BeginOutputReadLine();
     process.BeginErrorReadLine();
     return process;
 }
 
-static HttpClient CreateClient()
+static HttpClient CreateClient(int maxConnectionsPerServer = 1)
 {
     var handler = new SocketsHttpHandler
     {
         AllowAutoRedirect = false,
         AutomaticDecompression = DecompressionMethods.None,
-        MaxConnectionsPerServer = 1,
+        MaxConnectionsPerServer = maxConnectionsPerServer,
         UseCookies = false,
         UseProxy = false
     };
@@ -271,7 +302,27 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
     string origin = routerUrl;
 
     using (HttpResponseMessage page = await client.GetAsync($"{routerUrl}/ui/login"))
+    {
         EnsureStatus(page, HttpStatusCode.OK, "login page");
+        string loginHtml = await page.Content.ReadAsStringAsync();
+        if (!loginHtml.Contains(AdminUiStylesheetPath, StringComparison.Ordinal) ||
+            !loginHtml.Contains("<body><main>", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin UI login page does not use the vendored Pico stylesheet.");
+        if (!page.Headers.TryGetValues("Content-Security-Policy", out IEnumerable<string>? policies))
+            throw new InvalidOperationException("Admin UI login page is missing its Content-Security-Policy.");
+        string policy = policies.Single();
+        if (!policy.Contains("style-src 'self'", StringComparison.Ordinal) ||
+            policy.Contains("unsafe-inline", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin UI stylesheet policy is not restricted to the same origin.");
+    }
+
+    using (HttpResponseMessage stylesheet = await client.GetAsync(routerUrl + AdminUiStylesheetPath))
+    {
+        EnsureStatus(stylesheet, HttpStatusCode.OK, "Pico stylesheet");
+        if (stylesheet.Content.Headers.ContentType?.MediaType != "text/css" ||
+            stylesheet.Content.Headers.ContentLength is not > 50_000)
+            throw new InvalidOperationException("Admin UI Pico stylesheet response is invalid.");
+    }
 
     using (var login = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/login"))
     {
@@ -357,6 +408,43 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
     }
 }
 
+static async Task RunConcurrencySmokeAsync(
+    HttpClient client,
+    Uri endpoint,
+    byte[] requestBody,
+    SlowRequestGate slowRequest)
+{
+    Task<HttpResponseMessage> firstRequest = SendHoldRequestAsync(client, endpoint, requestBody);
+    await slowRequest.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    try
+    {
+        using HttpResponseMessage rejected = await SendHoldRequestAsync(client, endpoint, requestBody);
+        EnsureStatus(rejected, HttpStatusCode.TooManyRequests, "per-user concurrency rejection");
+    }
+    finally
+    {
+        slowRequest.Release.TrySetResult();
+    }
+
+    using HttpResponseMessage admitted = await firstRequest;
+    EnsureStatus(admitted, HttpStatusCode.OK, "admitted concurrent request");
+}
+
+static async Task<HttpResponseMessage> SendHoldRequestAsync(
+    HttpClient client,
+    Uri endpoint,
+    byte[] requestBody)
+{
+    using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+    {
+        Content = new ByteArrayContent(requestBody)
+    };
+    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
+    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-router-kely-hold"));
+    return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+}
+
 static void EnsureStatus(HttpResponseMessage response, HttpStatusCode expected, string operation)
 {
     if (response.StatusCode != expected)
@@ -426,6 +514,12 @@ static async Task<double> MeasureAsync(HttpClient client, Uri endpoint, byte[] r
     return elapsedMilliseconds;
 }
 
+static async Task<long> ReadAllocatedBytesAsync(HttpClient client, Uri endpoint)
+{
+    string value = await client.GetStringAsync(endpoint);
+    return long.Parse(value, NumberStyles.None, CultureInfo.InvariantCulture);
+}
+
 static int ReserveLoopbackPort()
 {
     var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -476,4 +570,11 @@ readonly record struct Metrics(double P50, double P95, double P99)
         int index = Math.Clamp((int)Math.Ceiling(sorted.Length * percentile) - 1, 0, sorted.Length - 1);
         return sorted[index];
     }
+}
+
+sealed class SlowRequestGate
+{
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 }

@@ -8,6 +8,29 @@ namespace RouterKely.Unit.Statistics;
 public sealed class UsageAccumulatorTests
 {
     [Fact]
+    public void KeysForTheSameUserShareTheConcurrencyLimit()
+    {
+        var route = new ModelRoute(0, "deepseek-fast", "deepseek-chat");
+        var identities = new IdentitySnapshot(
+            1,
+            [new IdentityUser(7, "User", "user@example.com", IdentityRole.User, true, null)],
+            [
+                new IdentityKey(41, 7, "First", new string('0', 64), "sk-rk_first", "first", true),
+                new IdentityKey(42, 7, "Second", new string('1', 64), "sk-rk_second", "second", true)
+            ]);
+        var accumulator = new UsageAccumulator([route], identities, maxConcurrentRequestsPerUser: 1);
+
+        Assert.True(accumulator.TryGetAccount(41, out UsageAccount? first));
+        Assert.True(accumulator.TryGetAccount(42, out UsageAccount? second));
+        Assert.Same(first!.Concurrency, second!.Concurrency);
+        Assert.True(first.Concurrency.TryAcquire());
+        Assert.False(second.Concurrency.TryAcquire());
+        first.Concurrency.Release();
+        Assert.True(second.Concurrency.TryAcquire());
+        second.Concurrency.Release();
+    }
+
+    [Fact]
     public async Task ExchangeFeedsInMemoryProviderAndUpdatesQuota()
     {
         var route = new ModelRoute(0, "deepseek-fast", "deepseek-chat");
