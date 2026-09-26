@@ -1,10 +1,11 @@
 using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Diagnostics;
 using System.Text.Json;
-using Microsoft.AspNetCore.Http.Features;
 using RouterKely.Core.Authentication;
 using RouterKely.Core.Routing;
+using RouterKely.Core.Statistics;
 
 namespace RouterKely.Proxy;
 
@@ -15,6 +16,7 @@ public sealed class ProxyService
     private readonly Uri _upstreamBaseUri;
     private readonly string _upstreamApiKey;
     private readonly ModelRoute[] _routes;
+    private readonly UsageAccumulator _usage;
     private readonly int _maxRequestBodyBytes;
     private readonly int _maxModelPrefixBytes;
 
@@ -24,6 +26,7 @@ public sealed class ProxyService
         Uri upstreamBaseUri,
         string upstreamApiKey,
         ModelRoute[] routes,
+        UsageAccumulator usage,
         int maxRequestBodyBytes,
         int maxModelPrefixBytes)
     {
@@ -32,6 +35,7 @@ public sealed class ProxyService
         _upstreamBaseUri = upstreamBaseUri;
         _upstreamApiKey = upstreamApiKey;
         _routes = routes;
+        _usage = usage;
         _maxRequestBodyBytes = maxRequestBodyBytes;
         _maxModelPrefixBytes = maxModelPrefixBytes;
     }
@@ -76,6 +80,12 @@ public sealed class ProxyService
             return;
         }
 
+        if (_usage.Quota.IsExceeded)
+        {
+            await WriteErrorAsync(context, 429, "quota_exceeded", "Daily quota exceeded.");
+            return;
+        }
+
         if (context.Request.ContentLength > _maxRequestBodyBytes)
         {
             await WriteErrorAsync(context, 413, "request_too_large", "Request body is too large.");
@@ -92,6 +102,9 @@ public sealed class ProxyService
         ModelRewritingContent? content = await CreateContentAsync(context);
         if (content is null)
             return;
+
+        ModelRoute route = content.Route;
+        long started = Stopwatch.GetTimestamp();
 
         using (content)
         using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_upstreamBaseUri, "chat/completions")))
@@ -115,17 +128,43 @@ public sealed class ProxyService
 
                 context.Response.StatusCode = (int)upstream.StatusCode;
                 CopyResponseHeaders(upstream, context.Response);
-                await upstream.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+                UsageObservation observed = await CopyResponseAsync(
+                    upstream.Content,
+                    context.Response,
+                    context.RequestAborted);
+                bool success = upstream.IsSuccessStatusCode;
+                UsageObservation accounted = success
+                    ? observed
+                    : new UsageObservation(0, 0, 0, true);
+                long cost = UsageCostCalculator.Calculate(
+                    accounted,
+                    route.InputNanoUsdPerMillion,
+                    route.CachedInputNanoUsdPerMillion,
+                    route.OutputNanoUsdPerMillion);
+                UsageOutcome outcome = success
+                    ? UsageOutcome.Success
+                    : upstream.StatusCode >= HttpStatusCode.InternalServerError
+                        ? UsageOutcome.UpstreamError
+                        : UsageOutcome.ClientError;
+                _usage.Record(
+                    route,
+                    outcome,
+                    accounted,
+                    cost,
+                    ElapsedMilliseconds(started));
             }
             catch (RequestBodyTooLargeException) when (!context.Response.HasStarted)
             {
+                _usage.Record(route, UsageOutcome.ClientError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
                 await WriteErrorAsync(context, 413, "request_too_large", "Request body is too large.");
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
+                _usage.Record(route, UsageOutcome.Cancelled, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
             }
             catch (HttpRequestException) when (!context.Response.HasStarted)
             {
+                _usage.Record(route, UsageOutcome.UpstreamError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
                 await WriteErrorAsync(context, 502, "upstream_error", "Unable to reach the upstream API.");
             }
         }
@@ -200,6 +239,37 @@ public sealed class ProxyService
 
         response.Headers.Remove("transfer-encoding");
     }
+
+    private static async Task<UsageObservation> CopyResponseAsync(
+        HttpContent content,
+        HttpResponse response,
+        CancellationToken cancellationToken)
+    {
+        await using Stream source = await content.ReadAsStreamAsync(cancellationToken);
+        var observer = new UsageStreamObserver();
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(16_384);
+        try
+        {
+            while (true)
+            {
+                int read = await source.ReadAsync(buffer, cancellationToken);
+                if (read == 0)
+                    break;
+
+                observer.Append(buffer.AsSpan(0, read));
+                await response.BodyWriter.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            }
+
+            return observer.Read();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static long ElapsedMilliseconds(long started) =>
+        (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
     private static bool IsHopByHop(string name) =>
         name.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||

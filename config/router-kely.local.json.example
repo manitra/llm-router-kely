@@ -9,15 +9,32 @@
     "models": [
       {
         "alias": "deepseek-fast",
-        "upstreamModel": "deepseek-chat"
+        "upstreamModel": "deepseek-chat",
+        "inputNanoUsdPerMillion": 0,
+        "cachedInputNanoUsdPerMillion": 0,
+        "outputNanoUsdPerMillion": 0,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 8192,
+        "supportsReasoning": false
       },
       {
         "alias": "deepseek-pro",
-        "upstreamModel": "deepseek-reasoner"
+        "upstreamModel": "deepseek-reasoner",
+        "inputNanoUsdPerMillion": 0,
+        "cachedInputNanoUsdPerMillion": 0,
+        "outputNanoUsdPerMillion": 0,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 8192,
+        "supportsReasoning": true
       }
     ],
+    "dailyQuotaNanoUsd": null,
+    "statistics": {
+      "flushIntervalMilliseconds": 1000,
+      "hourlyRetentionHours": 72,
+      "dailyRetentionDays": 7
+    },
     "maxRequestBodyBytes": 33554432,
     "maxModelPrefixBytes": 65536
   }
 }
-

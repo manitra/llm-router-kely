@@ -622,6 +622,8 @@ Compatibility is intentionally behavioral and narrow. The project publishes a ve
 | Method | Path | Purpose | Authorization |
 |---|---|---|---|
 | `GET` | `/key/info` | Current key, owner, usage, quota. | Any Router Kely key; own key only. |
+| `GET` | `/v1/model/info` and `/model/info` | LiteLLM-compatible metadata for configured public aliases. | Any Router Kely key. |
+| `GET` | `/user/daily/activity` | Retained daily aggregate usage with model/provider/key breakdowns. | Any Router Kely key; own usage only in MVP. |
 | `GET` | `/user/info` | Current user and aggregate usage. | Any Router Kely key; self by default. Admin may pass `user_id`. |
 | `POST` | `/key/generate` | Create a key for self, or specified user for admin. | Any Router Kely key. |
 | `POST` | `/key/delete` | Revoke named key IDs. | Owner or admin. |
@@ -636,26 +638,29 @@ Query parameters are ignored unless discovered as required. Response:
 ```json
 {
   "key": "sk-rk_…a1b2",
-  "key_id": 42,
-  "key_name": "VS Code",
-  "user_id": 7,
-  "user_email": "developer@example.com",
-  "models": ["deepseek-fast", "deepseek-pro"],
-  "spend": 12.345678,
-  "max_budget": 100.0,
-  "budget_reset_at": "2026-09-26T00:00:00Z",
-  "blocked": false,
-  "router_kely": {
-    "quota_scope": "user",
-    "quota_period": "day",
-    "currency": "USD",
-    "usage_nano_usd": 12345678000,
-    "quota_nano_usd": 100000000000
+  "info": {
+    "token": "sk-rk_…a1b2",
+    "key_id": 42,
+    "key_name": "VS Code",
+    "user_id": 7,
+    "user_email": "developer@example.com",
+    "models": ["deepseek-fast", "deepseek-pro"],
+    "spend": 12.345678,
+    "max_budget": 100.0,
+    "budget_reset_at": "2026-09-26T00:00:00Z",
+    "blocked": false,
+    "router_kely": {
+      "quota_scope": "user",
+      "quota_period": "day",
+      "currency": "USD",
+      "usage_nano_usd": 12345678000,
+      "quota_nano_usd": 100000000000
+    }
   }
 }
 ```
 
-`key` is always masked. `spend` and `max_budget` are JSON numbers derived on this cold path; the integer `router_kely` fields are authoritative. `spend` is the current UTC-day usage, and `budget_reset_at` is the start of the next UTC day. Unlimited quota emits `max_budget: null` and `quota_nano_usd: null`. `quota_period` is always `day` and distinguishes Router Kely's daily window from LiteLLM's monthly `budget_reset_at` convention.
+`key` and `info.token` are always masked. LiteLLM-compatible metadata is nested under `info`. `spend` and `max_budget` are JSON numbers derived on this cold path; the integer `router_kely` fields are authoritative. `spend` is the current UTC-day usage, and `budget_reset_at` is the start of the next UTC day. Unlimited quota emits `max_budget: null` and `quota_nano_usd: null`. `quota_period` is always `day` and distinguishes Router Kely's daily window from LiteLLM's monthly `budget_reset_at` convention.
 
 ### 14.3 `GET /user/info`
 
@@ -743,6 +748,54 @@ This is an aggregate compatibility view, not a per-request log. Parameters: `sta
 ```
 
 If actual clients require a different field name/shape, add an adapter only after a captured contract test. Do not add raw request logging to emulate LiteLLM.
+
+### 14.7 `GET /v1/model/info` and `/model/info`
+
+Both paths return the same authenticated response. The response contains a top-level `data` array with one item per configured public alias. Each item contains:
+
+- `model_name`: the public Router Kely alias;
+- `litellm_params.model`: the configured upstream model identifier, with no credential or internal host data;
+- `model_info.id`: a stable deterministic identifier derived from the alias;
+- configured context/output limits and per-token input/cache/output prices;
+- `litellm_provider: "deepseek"`, `mode: "chat"`, and the supported capability/parameter flags.
+
+Prices are JSON USD-per-token numbers derived from the authoritative integer nanoUSD-per-million-token configuration. This endpoint performs no upstream or statistics-provider I/O.
+
+### 14.8 `GET /user/daily/activity`
+
+Accept `start_date` and `end_date` as inclusive UTC `YYYY-MM-DD` dates, defaulting to the most recent 30 days and rejecting reversed or greater-than-366-day ranges. The response follows the observed LiteLLM aggregate shape:
+
+```json
+{
+  "results": [
+    {
+      "date": "2026-09-25",
+      "metrics": {
+        "spend": 0.123,
+        "prompt_tokens": 1200,
+        "completion_tokens": 340,
+        "total_tokens": 1540,
+        "api_requests": 3,
+        "cache_read_input_tokens": 800
+      },
+      "breakdown": {
+        "models": {},
+        "providers": {},
+        "api_keys": {}
+      }
+    }
+  ],
+  "metadata": {
+    "total_spend": 0.123,
+    "total_prompt_tokens": 1200,
+    "total_completion_tokens": 340,
+    "total_tokens": 1540,
+    "total_api_requests": 3
+  }
+}
+```
+
+The default provider returns only retained in-memory days. A newly started process therefore returns an empty `results` array until observed inference completes and the background aggregate pump publishes a batch. The inference path never calls this endpoint or the statistics provider.
 
 ## 15. Configuration
 

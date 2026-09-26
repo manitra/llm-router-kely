@@ -27,6 +27,8 @@ internal sealed class ModelRewritingContent : HttpContent
         _maxBodyBytes = maxBodyBytes;
     }
 
+    public ModelRoute Route => _rewrite.Route;
+
     protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
         SerializeToStreamAsync(stream, CancellationToken.None);
 

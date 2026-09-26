@@ -8,8 +8,8 @@ public sealed class ModelPrefixScannerTests
 {
     private static readonly ModelRoute[] Routes =
     [
-        new("deepseek-fast", "deepseek-chat"),
-        new("deepseek-pro", "deepseek-reasoner")
+        new(0, "deepseek-fast", "deepseek-chat"),
+        new(1, "deepseek-pro", "deepseek-reasoner")
     ];
 
     [Fact]
@@ -44,4 +44,3 @@ public sealed class ModelPrefixScannerTests
         Assert.Equal(ModelScanStatus.UnknownModel, status);
     }
 }
-

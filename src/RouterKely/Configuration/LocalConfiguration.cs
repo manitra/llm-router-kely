@@ -34,12 +34,17 @@ public sealed class RouterConfiguration
 
     public ModelConfiguration[] Models { get; init; } = [];
 
+    public long? DailyQuotaNanoUsd { get; init; }
+
+    public StatisticsConfiguration Statistics { get; set; } = new();
+
     public int MaxRequestBodyBytes { get; init; } = 33_554_432;
 
     public int MaxModelPrefixBytes { get; init; } = 65_536;
 
     internal void ApplyEnvironmentOverrides()
     {
+        Statistics ??= new StatisticsConfiguration();
         ListenUrl = Environment.GetEnvironmentVariable("ROUTERKELY_LISTEN_URL") ?? ListenUrl;
         ClientApiKey = Environment.GetEnvironmentVariable("ROUTERKELY_ADMIN_API_KEY") ?? ClientApiKey;
         Upstream.ApiKey = Environment.GetEnvironmentVariable("ROUTERKELY_DEEPSEEK_API_KEY") ?? Upstream.ApiKey;
@@ -59,12 +64,20 @@ public sealed class RouterConfiguration
             throw new InvalidOperationException("At least one model route is required.");
         if (Models.Any(model => string.IsNullOrWhiteSpace(model.Alias) || string.IsNullOrWhiteSpace(model.UpstreamModel)))
             throw new InvalidOperationException("Every model route requires Alias and UpstreamModel.");
+        if (Models.Any(model =>
+                model.InputNanoUsdPerMillion < 0 ||
+                model.CachedInputNanoUsdPerMillion < 0 ||
+                model.OutputNanoUsdPerMillion < 0))
+            throw new InvalidOperationException("Model prices cannot be negative.");
         if (Models.Select(model => model.Alias).Distinct(StringComparer.Ordinal).Count() != Models.Length)
             throw new InvalidOperationException("Model aliases must be unique.");
+        if (DailyQuotaNanoUsd < 0)
+            throw new InvalidOperationException("DailyQuotaNanoUsd cannot be negative.");
         if (MaxModelPrefixBytes is < 1 or > 1_048_576)
             throw new InvalidOperationException("MaxModelPrefixBytes must be between 1 and 1048576.");
         if (MaxRequestBodyBytes < MaxModelPrefixBytes)
             throw new InvalidOperationException("MaxRequestBodyBytes must be greater than or equal to MaxModelPrefixBytes.");
+        Statistics.Validate();
     }
 }
 
@@ -80,6 +93,37 @@ public sealed class ModelConfiguration
     public string Alias { get; init; } = string.Empty;
 
     public string UpstreamModel { get; init; } = string.Empty;
+
+    public long InputNanoUsdPerMillion { get; init; }
+
+    public long CachedInputNanoUsdPerMillion { get; init; }
+
+    public long OutputNanoUsdPerMillion { get; init; }
+
+    public int? MaxInputTokens { get; init; }
+
+    public int? MaxOutputTokens { get; init; }
+
+    public bool SupportsReasoning { get; init; }
+}
+
+public sealed class StatisticsConfiguration
+{
+    public int FlushIntervalMilliseconds { get; init; } = 1_000;
+
+    public int HourlyRetentionHours { get; init; } = 72;
+
+    public int DailyRetentionDays { get; init; } = 7;
+
+    internal void Validate()
+    {
+        if (FlushIntervalMilliseconds is < 100 or > 60_000)
+            throw new InvalidOperationException("Statistics.FlushIntervalMilliseconds must be between 100 and 60000.");
+        if (HourlyRetentionHours is < 1 or > 168)
+            throw new InvalidOperationException("Statistics.HourlyRetentionHours must be between 1 and 168.");
+        if (DailyRetentionDays is < 1 or > 31)
+            throw new InvalidOperationException("Statistics.DailyRetentionDays must be between 1 and 31.");
+    }
 }
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

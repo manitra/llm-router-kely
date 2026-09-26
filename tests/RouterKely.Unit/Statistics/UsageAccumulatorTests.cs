@@ -1,0 +1,37 @@
+using RouterKely.Core.Routing;
+using RouterKely.Core.Statistics;
+using Xunit;
+
+namespace RouterKely.Unit.Statistics;
+
+public sealed class UsageAccumulatorTests
+{
+    [Fact]
+    public async Task ExchangeFeedsInMemoryProviderAndUpdatesQuota()
+    {
+        var route = new ModelRoute(0, "deepseek-fast", "deepseek-chat");
+        var accumulator = new UsageAccumulator(7, 42, [route], 1_000);
+        var provider = new InMemoryStatisticsProvider();
+        var usage = new UsageObservation(100, 20, 30, true);
+
+        accumulator.Record(route, UsageOutcome.Success, usage, 250, 10);
+        UsageBatch batch = accumulator.ExchangePending(DateTimeOffset.UtcNow);
+        await provider.WriteAsync(batch, CancellationToken.None);
+        StatisticsSnapshot snapshot = await provider.QueryAsync(
+            DateOnly.FromDateTime(DateTime.UtcNow),
+            DateOnly.FromDateTime(DateTime.UtcNow),
+            CancellationToken.None);
+
+        Assert.Equal(250, accumulator.Quota.CurrentUsageNanoUsd);
+        Assert.False(accumulator.Quota.IsExceeded);
+        DailyUsage day = Assert.Single(snapshot.Days);
+        Assert.Equal(1, day.RequestCount);
+        Assert.Equal(100, day.InputTokens);
+        Assert.Equal(30, day.OutputTokens);
+        Assert.Equal(250, day.CostNanoUsd);
+        Assert.Empty(accumulator.ExchangePending(DateTimeOffset.UtcNow).Entries);
+
+        accumulator.Record(route, UsageOutcome.Success, usage, 750, 10);
+        Assert.True(accumulator.Quota.IsExceeded);
+    }
+}
