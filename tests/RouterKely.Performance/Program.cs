@@ -87,8 +87,8 @@ try
 
     for (int index = 0; index < warmup; index++)
     {
-        await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
-        await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
+        await MeasureAsync(directClient, directEndpoint, directRequest, false, ApiKey, ResponseBytes);
+        await MeasureAsync(routerClient, routerEndpoint, routerRequest, true, ApiKey, ResponseBytes);
     }
     _ = await ReadAllocatedBytesAsync(routerClient, allocationEndpoint);
     long allocatedBytesBefore = await ReadAllocatedBytesAsync(routerClient, allocationEndpoint);
@@ -99,13 +99,13 @@ try
     {
         if ((index & 1) == 0)
         {
-            directMilliseconds[index] = await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
-            routerMilliseconds[index] = await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
+            directMilliseconds[index] = await MeasureAsync(directClient, directEndpoint, directRequest, false, ApiKey, ResponseBytes);
+            routerMilliseconds[index] = await MeasureAsync(routerClient, routerEndpoint, routerRequest, true, ApiKey, ResponseBytes);
         }
         else
         {
-            routerMilliseconds[index] = await MeasureAsync(routerClient, routerEndpoint, routerRequest, authorize: true);
-            directMilliseconds[index] = await MeasureAsync(directClient, directEndpoint, directRequest, authorize: false);
+            routerMilliseconds[index] = await MeasureAsync(routerClient, routerEndpoint, routerRequest, true, ApiKey, ResponseBytes);
+            directMilliseconds[index] = await MeasureAsync(directClient, directEndpoint, directRequest, false, ApiKey, ResponseBytes);
         }
     }
 
@@ -138,6 +138,18 @@ try
     Console.WriteLine($"  files:      {publishedFiles.Length:N0} published | required {ExpectedPublishedFileCount} => {(fileCountPass ? "PASS" : "MISS")} (enforced)");
     Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
 
+    LargePayload.LargePayloadReport payloads = await LargePayload.RunAsync(routerExecutable, temporaryDirectory, samples);
+    bool payloadAllocationPass = payloads.Metrics.All(
+        metric => metric.AllocatedBytesPerRequest <= MaxAllocatedBytesPerRequest);
+    Console.WriteLine(
+        "  payload:    overhead p50 "
+        + string.Join(" | ", payloads.Metrics.Select(metric => $"{metric.Label} {metric.OverheadP50:F3} ms"))
+        + " (informational)");
+    Console.WriteLine(
+        "  payload:    allocation "
+        + string.Join(" | ", payloads.Metrics.Select(metric => $"{metric.Label} {metric.AllocatedBytesPerRequest:N0} B"))
+        + $" | limit <= {MaxAllocatedBytesPerRequest:N0} B => {(payloadAllocationPass ? "PASS" : "MISS")} (enforced)");
+
     await RunAdminUiSmokeAsync(routerUrl, mockUrl);
     Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke, edit+save model list)");
     await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, gate);
@@ -146,7 +158,7 @@ try
     ParallelSmokeReport parallel = await ParallelSmoke.RunAsync(routerExecutable, temporaryDirectory);
     Console.WriteLine($"  parallel:   {parallel.Detail} in {parallel.ElapsedMilliseconds / 1_000d:F1} s");
 
-    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass)
+    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass || !payloadAllocationPass)
         return 1;
 
     if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))
@@ -472,38 +484,6 @@ static string ExtractBetween(string value, string start, string end)
     return value[startIndex..endIndex];
 }
 
-static async Task<double> MeasureAsync(HttpClient client, Uri endpoint, byte[] requestBody, bool authorize)
-{
-    using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
-    {
-        Version = HttpVersion.Version11,
-        VersionPolicy = HttpVersionPolicy.RequestVersionExact,
-        Content = new ByteArrayContent(requestBody)
-    };
-    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-    if (authorize)
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
-
-    long started = Stopwatch.GetTimestamp();
-    using HttpResponseMessage response = await client.SendAsync(
-        request,
-        HttpCompletionOption.ResponseHeadersRead);
-    byte[] body = await response.Content.ReadAsByteArrayAsync();
-    double elapsedMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-
-    if (response.StatusCode != HttpStatusCode.OK || body.Length != ResponseBytes)
-        throw new InvalidOperationException(
-            $"Unexpected response: {(int)response.StatusCode}, {body.Length} bytes.");
-
-    return elapsedMilliseconds;
-}
-
-static async Task<long> ReadAllocatedBytesAsync(HttpClient client, Uri endpoint)
-{
-    string value = await client.GetStringAsync(endpoint);
-    return long.Parse(value, NumberStyles.None, CultureInfo.InvariantCulture);
-}
-
 static string FormatMiB(long bytes) =>
     (bytes / (1_024d * 1_024d)).ToString("F2", CultureInfo.InvariantCulture);
 
@@ -518,23 +498,4 @@ static string FindRepositoryRoot()
     }
 
     throw new InvalidOperationException("Could not locate RouterKely.slnx.");
-}
-
-readonly record struct Metrics(double P50, double P95, double P99)
-{
-    public static Metrics Calculate(double[] values)
-    {
-        double[] sorted = (double[])values.Clone();
-        Array.Sort(sorted);
-        return new Metrics(
-            Percentile(sorted, 0.50),
-            Percentile(sorted, 0.95),
-            Percentile(sorted, 0.99));
-    }
-
-    private static double Percentile(double[] sorted, double percentile)
-    {
-        int index = Math.Clamp((int)Math.Ceiling(sorted.Length * percentile) - 1, 0, sorted.Length - 1);
-        return sorted[index];
-    }
 }

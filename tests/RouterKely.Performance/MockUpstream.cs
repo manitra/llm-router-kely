@@ -11,9 +11,15 @@ using System.Text;
 internal static class MockUpstream
 {
     internal const int ResponseBytes = 1_024;
+    /// <summary>Payload-scaling sizes; the model name in the request selects one.</summary>
+    internal const int LargeResponseBytes = 51_200;
+    internal const int HugeResponseBytes = 102_400;
+    internal const string LargeUpstreamModel = "deepseek-large";
+    internal const string HugeUpstreamModel = "deepseek-huge";
     internal const string HoldHeader = "application/x-router-kely-hold";
     private const int MaxScannedBodyBytes = 4_096;
     private static readonly byte[] UserMarker = "\"user\":\""u8.ToArray();
+    private static readonly byte[] ModelMarker = "\"model\":\""u8.ToArray();
 
     internal static async Task<WebApplication> StartAsync(
         string url,
@@ -27,7 +33,7 @@ internal static class MockUpstream
 
         app.MapPost("/v1/chat/completions", async context =>
         {
-            string id = await ReadUserIdAsync(context.Request.Body, context.RequestAborted);
+            (string id, string model) = await ReadRequestHeadAsync(context.Request.Body, context.RequestAborted);
             gate.Enter();
             try
             {
@@ -36,7 +42,7 @@ internal static class MockUpstream
                 else if (delayMilliseconds > 0)
                     await Task.Delay(delayMilliseconds, context.RequestAborted);
 
-                byte[] response = CreateResponseBody(id);
+                byte[] response = CreateResponseBody(id, ResponseSizeFor(model));
                 context.Response.StatusCode = StatusCodes.Status200OK;
                 context.Response.ContentType = "application/json";
                 context.Response.ContentLength = response.Length;
@@ -52,21 +58,39 @@ internal static class MockUpstream
         return app;
     }
 
-    internal static byte[] CreateResponseBody(string id)
+    private static int ResponseSizeFor(string model) => model switch
     {
-        string json = $"{{\"id\":\"{id}\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"ok\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":0}}}}";
-        byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
-        if (jsonBytes.Length > ResponseBytes)
-            throw new InvalidOperationException("Mock response exceeds its fixed size.");
+        LargeUpstreamModel => LargeResponseBytes,
+        HugeUpstreamModel => HugeResponseBytes,
+        _ => ResponseBytes
+    };
 
-        byte[] response = new byte[ResponseBytes];
-        jsonBytes.CopyTo(response, 0);
-        response.AsSpan(jsonBytes.Length).Fill((byte)' ');
+    /// <summary>
+    /// Builds exactly <paramref name="size"/> bytes of valid completion JSON. The bulk sits inside
+    /// the <c>content</c> string so the response-path cost scales with the payload instead of
+    /// landing in trailing whitespace.
+    /// </summary>
+    internal static byte[] CreateResponseBody(string id, int size)
+    {
+        byte[] head = Encoding.UTF8.GetBytes(
+            $"{{\"id\":\"{id}\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"");
+        byte[] tail = Encoding.UTF8.GetBytes(
+            "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":0}}");
+        int padding = size - head.Length - tail.Length;
+        if (padding < 1)
+            throw new InvalidOperationException($"Mock response size {size} is smaller than its envelope.");
+
+        byte[] response = new byte[size];
+        head.CopyTo(response, 0);
+        response.AsSpan(head.Length, padding).Fill((byte)'a');
+        tail.CopyTo(response, head.Length + padding);
         return response;
     }
 
-    /// <summary>Reads the head of the body for the caller-supplied id and drains the rest.</summary>
-    private static async Task<string> ReadUserIdAsync(Stream body, CancellationToken cancellationToken)
+    /// <summary>Reads the head of the body for the echoed id and the selected model, then drains the rest.</summary>
+    private static async Task<(string Id, string Model)> ReadRequestHeadAsync(
+        Stream body,
+        CancellationToken cancellationToken)
     {
         byte[] buffer = ArrayPool<byte>.Shared.Rent(MaxScannedBodyBytes);
         int length = 0;
@@ -82,9 +106,11 @@ internal static class MockUpstream
                 length += read;
             }
 
-            string id = ExtractUserId(buffer.AsSpan(0, length));
+            ReadOnlySpan<byte> head = buffer.AsSpan(0, length);
+            string id = ExtractValue(head, UserMarker, maxLength: 16, "none");
+            string model = ExtractValue(head, ModelMarker, maxLength: 32, string.Empty);
             await body.CopyToAsync(Stream.Null, cancellationToken);
-            return id;
+            return (id, model);
         }
         finally
         {
@@ -93,26 +119,30 @@ internal static class MockUpstream
     }
 
     /// <summary>
-    /// Returns the <c>user</c> value, or <c>none</c>. Only a short identifier is accepted so the
-    /// echoed value can never turn the fixed response into invalid JSON.
+    /// Returns the value of a <c>"name":"</c> marker, or <paramref name="fallback"/> when it is
+    /// absent, empty, too long, or holds a character that could break the response envelope.
     /// </summary>
-    private static string ExtractUserId(ReadOnlySpan<byte> body)
+    private static string ExtractValue(
+        ReadOnlySpan<byte> body,
+        ReadOnlySpan<byte> marker,
+        int maxLength,
+        string fallback)
     {
-        int marker = body.IndexOf(UserMarker);
-        if (marker < 0)
-            return "none";
+        int start = body.IndexOf(marker);
+        if (start < 0)
+            return fallback;
 
-        ReadOnlySpan<byte> rest = body[(marker + UserMarker.Length)..];
+        ReadOnlySpan<byte> rest = body[(start + marker.Length)..];
         int end = rest.IndexOf((byte)'"');
-        if (end is < 1 or > 16)
-            return "none";
+        if (end is < 1 || end > maxLength)
+            return fallback;
 
         ReadOnlySpan<byte> value = rest[..end];
         foreach (byte character in value)
         {
             if (character is not ((>= (byte)'a' and <= (byte)'z') or
-                (>= (byte)'0' and <= (byte)'9') or (byte)'-'))
-                return "none";
+                (>= (byte)'0' and <= (byte)'9') or (byte)'-' or (byte)'_'))
+                return fallback;
         }
 
         return Encoding.ASCII.GetString(value);

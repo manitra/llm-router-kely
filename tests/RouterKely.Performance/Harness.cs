@@ -120,9 +120,20 @@ internal static class Harness
         string mockUrl,
         string clientApiKey,
         int maxConcurrentRequests,
-        int maxConcurrentRequestsPerUser)
+        int maxConcurrentRequestsPerUser,
+        IReadOnlyList<(string Alias, string UpstreamModel)>? models = null)
     {
         string path = Path.Combine(directory, fileName);
+        var modelRows = (models ?? [(PerfAlias, PerfUpstreamModel)])
+            .Select(model => new
+            {
+                alias = model.Alias,
+                upstreamModel = model.UpstreamModel,
+                inputNanoUsdPerMillion = 1_000_000_000L,
+                cachedInputNanoUsdPerMillion = 100_000_000L,
+                outputNanoUsdPerMillion = 2_000_000_000L
+            })
+            .ToArray();
         var configuration = new
         {
             routerKely = new
@@ -135,17 +146,7 @@ internal static class Harness
                     apiKey = MockUpstreamApiKey,
                     allowInsecureLoopback = true
                 },
-                models = new[]
-                {
-                    new
-                    {
-                        alias = PerfAlias,
-                        upstreamModel = PerfUpstreamModel,
-                        inputNanoUsdPerMillion = 1_000_000_000L,
-                        cachedInputNanoUsdPerMillion = 100_000_000L,
-                        outputNanoUsdPerMillion = 2_000_000_000L
-                    }
-                },
+                models = modelRows,
                 dailyQuotaNanoUsd = (long?)null,
                 statistics = new
                 {
@@ -162,5 +163,68 @@ internal static class Harness
 
         File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(configuration));
         return path;
+    }
+
+    /// <summary>
+    /// Sends one request and returns its wall-clock time, asserting the response is exactly
+    /// <paramref name="expectedBytes"/> bytes. The direct and routed baselines share this helper so
+    /// their measurements stay comparable.
+    /// </summary>
+    internal static async Task<double> MeasureAsync(
+        HttpClient client,
+        Uri endpoint,
+        byte[] requestBody,
+        bool authorize,
+        string apiKey,
+        int expectedBytes)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Version = HttpVersion.Version11,
+            VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+            Content = new ByteArrayContent(requestBody)
+        };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        if (authorize)
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+        long started = Stopwatch.GetTimestamp();
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead);
+        byte[] body = await response.Content.ReadAsByteArrayAsync();
+        double elapsedMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        if (response.StatusCode != HttpStatusCode.OK || body.Length != expectedBytes)
+            throw new InvalidOperationException(
+                $"Unexpected response: {(int)response.StatusCode}, {body.Length} bytes (expected {expectedBytes}).");
+
+        return elapsedMilliseconds;
+    }
+
+    internal static async Task<long> ReadAllocatedBytesAsync(HttpClient client, Uri endpoint)
+    {
+        string value = await client.GetStringAsync(endpoint);
+        return long.Parse(value, NumberStyles.None, CultureInfo.InvariantCulture);
+    }
+}
+
+/// <summary>Latency percentiles in milliseconds for one client-side measurement loop.</summary>
+internal readonly record struct Metrics(double P50, double P95, double P99)
+{
+    internal static Metrics Calculate(double[] values)
+    {
+        double[] sorted = (double[])values.Clone();
+        Array.Sort(sorted);
+        return new Metrics(
+            Percentile(sorted, 0.50),
+            Percentile(sorted, 0.95),
+            Percentile(sorted, 0.99));
+    }
+
+    private static double Percentile(double[] sorted, double percentile)
+    {
+        int index = Math.Clamp((int)Math.Ceiling(sorted.Length * percentile) - 1, 0, sorted.Length - 1);
+        return sorted[index];
     }
 }

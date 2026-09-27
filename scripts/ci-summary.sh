@@ -69,6 +69,8 @@ read -r memory_value memory_limit memory_result <<<"$(extract 's/.*memory:[[:spa
 read -r binary_value binary_limit binary_result <<<"$(extract 's/.*binary:[[:space:]]+([0-9.]+) MiB \| limit <= ([0-9.]+) MiB => (PASS|MISS).*/\1 \2 \3/p')" || true
 read -r files_value files_limit files_result <<<"$(extract 's/.*files:[[:space:]]+([0-9,]+) published \| required ([0-9]+) => (PASS|MISS).*/\1 \2 \3/p')" || true
 constraint_result="$(extract 's/.*constraint:.*=> (PASS|MISS).*/\1/p')"
+read -r payload_1k payload_50k payload_100k <<<"$(extract 's/.*payload:[[:space:]]+overhead p50 1k ([0-9.]+) ms \| 50k ([0-9.]+) ms \| 100k ([0-9.]+) ms.*/\1 \2 \3/p')" || true
+read -r payload_alloc_1k payload_alloc_50k payload_alloc_100k payload_alloc_limit payload_alloc_result <<<"$(extract 's/.*payload:[[:space:]]+allocation 1k ([0-9,]+) B \| 50k ([0-9,]+) B \| 100k ([0-9,]+) B \| limit <= ([0-9,]+) B => (PASS|MISS).*/\1 \2 \3 \4 \5/p')" || true
 admin_result="$(extract 's/.*admin UI:[[:space:]]+(PASS).*/\1/p')"
 concurrency_result="$(extract 's/.*concurrency:[[:space:]]+(PASS).*/\1/p')"
 parallel_result="$(extract 's/.*parallel:[[:space:]]+(PASS).*/\1/p')"
@@ -151,6 +153,12 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
     "$(value_or_dash "$files_value")" "$(value_or_dash "$files_limit")" "$(icon "$files_result")"
   printf '| p50 & p99 overhead | p50 %s / p99 %s ms | < 0.250 / < 1.000 ms | %s |\n' \
     "$(value_or_dash "$overhead_p50")" "$(value_or_dash "$overhead_p99")" "$(icon "$constraint_result")"
+  printf '| Payload scaling p50 overhead | 1k %s · 50k %s · 100k %s ms | — | ℹ️ |\n' \
+    "$(value_or_dash "$payload_1k")" "$(value_or_dash "$payload_50k")" "$(value_or_dash "$payload_100k")"
+  printf '| Payload scaling allocation | 1k %s · 50k %s · 100k %s B | ≤ %s B | %s |\n' \
+    "$(value_or_dash "$payload_alloc_1k")" "$(value_or_dash "$payload_alloc_50k")" \
+    "$(value_or_dash "$payload_alloc_100k")" "$(value_or_dash "$payload_alloc_limit")" \
+    "$(icon "$payload_alloc_result")"
   printf '| Admin UI smoke | %s | — | %s |\n' "$(value_or_dash "$admin_result")" "$(icon "$admin_result")"
   printf '| Concurrency smoke | %s | — | %s |\n' "$(value_or_dash "$concurrency_result")" "$(icon "$concurrency_result")"
   printf '| Parallel concurrency smoke | %s | — | %s |\n' "$(value_or_dash "$parallel_result")" "$(icon "$parallel_result")"
