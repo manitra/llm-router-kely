@@ -1,4 +1,6 @@
 using RouterKely.Configuration;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Primitives;
 using Xunit;
 
 namespace RouterKely.Unit.Configuration;
@@ -113,6 +115,112 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
         Assert.Equal("${ROUTERKELY_ADMIN_API_KEY}", form.ClientApiKey);
         Assert.Equal("${ROUTERKELY_DEEPSEEK_API_KEY}", form.UpstreamApiKey);
     }
+
+    [Fact]
+    public void FromFormKeepsModelRowsAlignedWhenAReasoningCheckboxIsUnchecked()
+    {
+        // Browsers omit unchecked checkboxes, so a positional parser would shift every later row.
+        var form = new FormCollection(new Dictionary<string, StringValues>
+        {
+            ["models[0].alias"] = "fast",
+            ["models[0].upstreamModel"] = "deepseek-chat",
+            ["models[0].input"] = "1",
+            ["models[0].cachedInput"] = "0",
+            ["models[0].output"] = "2",
+            ["models[1].alias"] = "pro",
+            ["models[1].upstreamModel"] = "deepseek-reasoner",
+            ["models[1].input"] = "3",
+            ["models[1].cachedInput"] = "0",
+            ["models[1].output"] = "4",
+            ["models[1].supportsReasoning"] = "true",
+            ["models[2].alias"] = "mini",
+            ["models[2].upstreamModel"] = "deepseek-chat",
+            ["models[2].input"] = "5",
+            ["models[2].cachedInput"] = "0",
+            ["models[2].output"] = "6",
+        });
+
+        ConfigForm parsed = ConfigurationAdminService.FromForm(form);
+
+        Assert.Equal(3, parsed.Models.Length);
+        Assert.Equal("fast", parsed.Models[0].Alias);
+        Assert.False(parsed.Models[0].SupportsReasoning);
+        Assert.Equal("pro", parsed.Models[1].Alias);
+        Assert.True(parsed.Models[1].SupportsReasoning);
+        Assert.Equal("mini", parsed.Models[2].Alias);
+        Assert.False(parsed.Models[2].SupportsReasoning);
+    }
+
+    [Fact]
+    public void TryAddAndRemoveModelKeepAtLeastOneRowAndRespectTheCap()
+    {
+        var form = new ConfigForm { Models = [new ConfigModelForm { Alias = "a", UpstreamModel = "b" }] };
+
+        Assert.False(ConfigurationAdminService.TryRemoveModel(form, 0));
+        Assert.Single(form.Models);
+
+        Assert.True(ConfigurationAdminService.TryAddModel(form));
+        form.Models[1].Alias = "c";
+        Assert.True(ConfigurationAdminService.TryRemoveModel(form, 0));
+        Assert.Equal("c", Assert.Single(form.Models).Alias);
+
+        Assert.False(ConfigurationAdminService.TryRemoveModel(form, 99));
+        Assert.True(ConfigurationAdminService.TryAddModel(form));
+        form.Models[1].Alias = "d";
+
+        while (ConfigurationAdminService.TryAddModel(form))
+        {
+        }
+        Assert.Equal(RouterConfiguration.MaxModelRoutes, form.Models.Length);
+        Assert.False(ConfigurationAdminService.TryAddModel(form));
+    }
+
+    [Fact]
+    public void SavePersistsAVariableLengthModelList()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        Assert.True(ConfigurationAdminService.TryAddModel(form));
+
+        ConfigModelForm added = form.Models[2];
+        added.Alias = "deepseek-mini";
+        added.UpstreamModel = "deepseek-chat";
+        added.InputUsdPerMillion = "10";
+        added.CachedInputUsdPerMillion = "0";
+        added.OutputUsdPerMillion = "20";
+
+        service.Save(form);
+        ModelConfiguration[] saved = service.LoadRaw().RouterKely.Models;
+
+        Assert.Equal(3, saved.Length);
+        Assert.Equal("deepseek-mini", saved[2].Alias);
+        Assert.Equal(10, saved[2].InputNanoUsdPerMillion);
+        Assert.Equal(20, saved[2].OutputNanoUsdPerMillion);
+    }
+
+    [Fact]
+    public void SaveRejectsMoreModelRoutesThanTheCap()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.Models = Enumerable.Range(0, RouterConfiguration.MaxModelRoutes + 1)
+            .Select(index => new ConfigModelForm
+            {
+                Alias = $"alias-{index}",
+                UpstreamModel = "deepseek-chat",
+                InputUsdPerMillion = "0",
+                CachedInputUsdPerMillion = "0",
+                OutputUsdPerMillion = "0",
+            })
+            .ToArray();
+
+        var exception = Assert.Throws<InvalidOperationException>(() => service.Save(form));
+
+        Assert.Contains("model routes", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void Seed()
     {
         string template = Path.Combine(

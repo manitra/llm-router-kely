@@ -17,7 +17,7 @@
 
 `LLM` makes the project's purpose easy to discover, while `Kely`—Malagasy for “small”—expresses its tiny, locally rooted design.
 
-The data plane behaves like an HTTP streaming proxy with authentication, a two-entry model map, user-level quota admission, and asynchronous accounting attached:
+The data plane behaves like an HTTP streaming proxy with authentication, a small alias-to-upstream model map, user-level quota admission, and asynchronous accounting attached:
 
 ```text
 coding client
@@ -39,11 +39,11 @@ The control plane is a small server-rendered UI under `/ui`. The default identit
 
 The MVP is successful when:
 
-- Existing coding clients can switch from LiteLLM by changing only the base URL, while retaining their LLM Router Kely-issued API key and one of the two advertised aliases.
+- Existing coding clients can switch from LiteLLM by changing only the base URL, while retaining their LLM Router Kely-issued API key and one of the advertised aliases.
 - The measured incremental proxy overhead is below 1 ms at p99 under the benchmark conditions in section 18.
 - The service stays below 250 MiB RSS with a 1-vCPU limit under the required workload.
 - No inference request performs external state I/O, waits for accounting, buffers a complete body, or constructs an OpenAI request/response object graph.
-- Users, keys, daily quotas, usage, and the two model aliases are understandable without teams or inheritance rules.
+- Users, keys, daily quotas, usage, and the model aliases are understandable without teams or inheritance rules.
 
 ### 1.2 Normative language
 
@@ -61,8 +61,8 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Keys | Credentials only; a key has no quota or model policy. |
 | Roles | `admin` and `user`. |
 | Upstreams | One DeepSeek base URL and API credential. |
-| Models | Exactly two configured public aliases: `deepseek-fast` and `deepseek-pro`. |
-| Default mapping | `deepseek-fast` → `deepseek-chat`; `deepseek-pro` → `deepseek-reasoner`. Both are configurable. |
+| Models | A configurable list of public aliases, between one and 64 rows. The shipped default defines two: `deepseek-fast` and `deepseek-pro`. |
+| Default mapping | `deepseek-fast` → `deepseek-chat`; `deepseek-pro` → `deepseek-reasoner`. Aliases, upstream IDs, prices, and token caps are all editable. |
 | Inference protocols | OpenAI-compatible Chat Completions and Responses request forwarding. |
 | Response behavior | Preserve upstream status, body bytes, and streaming behavior; do not translate response bodies. |
 | Identity state | Default: one atomically replaced configuration file containing users, quotas, and key hashes, plus one environment-supplied administrator key. |
@@ -85,7 +85,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 - Authenticate high-entropy bearer API keys in O(1) expected time.
 - Reject disabled/revoked keys and disabled users.
 - Enforce one user-level daily quota using integer nano-US-dollar accounting.
-- Advertise two public model aliases.
+- Advertise the configured public model aliases (between one and 64).
 - Rewrite only the top-level request `model` value and forward unknown JSON fields unchanged.
 - Proxy streaming and non-streaming Chat Completions and Responses requests.
 - Observe usage fields without delaying or modifying response bytes.
@@ -445,7 +445,7 @@ All browser UI routes live under `/ui`:
 | `/ui/admin/users/new` | Admin add-user form. |
 | `/ui/admin/users/{id}` | Admin edit-user form (upsert) plus that user's keys. |
 | `/ui/admin/usage` | System totals and per-user/model aggregates. |
-| `/ui/admin/config` | Edit the runtime configuration file (non-secret fields). |
+| `/ui/admin/config` | Edit the runtime configuration file (non-secret fields), including adding and removing model rows. |
 
 The look and route placement SHOULD feel familiar to LiteLLM users, but pixel/API parity is not a goal. The UI must work without JavaScript for primary operations. Small progressive-enhancement JavaScript embedded in the executable is allowed.
 
@@ -454,6 +454,8 @@ The UI uses the pinned Pico CSS 2.1.1 classless build. Its minified stylesheet i
 The initial administration UI is intentionally one server-rendered users table plus one upsert user form. The list page contains no forms other than sign-out; every row offers an `Edit` link and the table footer offers an `Add user` link, and both open the same form at `/ui/admin/users/new` or `/ui/admin/users/{id}`. `POST /ui/actions/users` upserts: an absent `id` creates a user, a present `id` updates name, email, quota, and enabled state. “Remove user” means disabling the user via that form; “remove key” means revoking the key. Neither operation physically deletes identity history. The user form generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
 
 A server-rendered configuration editor at `/ui/admin/config` exposes the runtime configuration file: `listenUrl`, `clientApiKey`, `upstream.baseUrl`, `upstream.apiKey`, `upstream.allowInsecureLoopback`, identity limits, model aliases/upstream IDs/prices/token caps/capability flags, default daily quota, body/prefix/concurrency limits, and statistics retention. The form POSTs to `/ui/actions/config`, which atomically writes a temporary file in the same directory and renames it over the original before reporting success. Because the configuration is read once at startup, the page always carries a banner explaining that changes only apply after a restart and never replaces the running snapshot on its own. Secret fields are not redacted; the editor shows their literal value (typically a `${NAME}` reference) so the operator can see exactly which environment variable must be configured in the platform. Editing non-existent or malformed values fails the same validation the startup path runs, so an invalid form cannot leave a half-written file behind. The editor requires an admin session, the same-origin/CSRF guard, and signed-in role as every other control-plane action.
+
+The model list is variable-length. Its rows are posted with indexed names (`models[0].alias`, `models[1].upstreamModel`, …) so any number of rows round-trips without positional guessing; an unchecked `supportsReasoning` checkbox is simply absent for its own index and never shifts later rows. Each row carries a `Remove model #N` button and the fieldset carries an `Add model` button; both post the whole form to `/ui/actions/config/models` with `formnovalidate`, which adds or drops one row and re-renders the editor without saving, so the operator can review every value before committing with the single `Save configuration` button. The last remaining row cannot be removed and the list cannot exceed 64 rows; both limits are enforced by the same validation the startup path runs.
 
 ### 10.2 Browser session
 
@@ -566,7 +568,7 @@ Do not allocate and enqueue one object per request. Maintain pre-created/sharded
 (UTC hour, user_id, key_id, public_model_alias, outcome_class)
 ```
 
-Completion atomically increments request count, input/output/cached tokens, cost, duration sum, and usage-missing count. Cardinality is bounded by configured users × keys × two models × small outcome set. New hourly buckets are created on a cold rollover path.
+Completion atomically increments request count, input/output/cached tokens, cost, duration sum, and usage-missing count. Cardinality is bounded by configured users × keys × models × small outcome set. New hourly buckets are created on a cold rollover path.
 
 `outcome_class` is one of `success`, `client_error`, `upstream_error`, or `cancelled`; raw status may be aggregated into a fixed status-class counter. Do not create a label/key from arbitrary paths, status text, client IDs, or request data.
 

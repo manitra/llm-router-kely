@@ -158,6 +158,7 @@ app.MapPost("/ui/actions/users", ui.SaveUserAsync);
 app.MapPost("/ui/actions/users/{id:long}/keys/create", ui.CreateKeyAsync);
 app.MapGet("/ui/admin/config", ui.ConfigPageAsync);
 app.MapPost("/ui/actions/config", ui.SaveConfigAsync);
+app.MapPost(AdminUiService.ModelsActionPath, ui.EditModelsAsync);
 app.MapPost("/ui/actions/keys/{id:long}/revoke", ui.RevokeKeyAsync);
 
 await app.RunAsync();

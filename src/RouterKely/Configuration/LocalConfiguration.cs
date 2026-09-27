@@ -93,6 +93,9 @@ public sealed class LocalConfiguration
 
 public sealed class RouterConfiguration
 {
+    /// <summary>Upper bound on configurable model routes, shared by validation and the admin UI.</summary>
+    public const int MaxModelRoutes = 64;
+
     public string ListenUrl { get; set; } = "http://127.0.0.1:8080";
 
     public string ClientApiKey { get; set; } = string.Empty;
@@ -193,8 +196,8 @@ public sealed class RouterConfiguration
                 "RouterKely.Upstream.BaseUrl must use HTTPS unless insecure loopback is explicitly enabled.");
         if (string.IsNullOrWhiteSpace(Upstream.ApiKey))
             throw new InvalidOperationException("RouterKely.Upstream.ApiKey or ROUTERKELY_DEEPSEEK_API_KEY is required.");
-        if (Models.Length == 0)
-            throw new InvalidOperationException("At least one model route is required.");
+        if (Models.Length is < 1 or > MaxModelRoutes)
+            throw new InvalidOperationException($"Between 1 and {MaxModelRoutes} model routes must be configured.");
         if (Models.Any(model => string.IsNullOrWhiteSpace(model.Alias) || string.IsNullOrWhiteSpace(model.UpstreamModel)))
             throw new InvalidOperationException("Every model route requires Alias and UpstreamModel.");
         if (Models.Any(model =>

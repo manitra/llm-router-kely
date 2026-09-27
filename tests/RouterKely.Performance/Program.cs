@@ -9,6 +9,7 @@ using System.Text.Json;
 
 const string ApiKey = "sk-rk-performance-test";
 const string AdminUiStylesheetPath = "/ui/assets/pico.classless-2.1.1.min.css";
+const string AdminUiModelsActionPath = "/ui/actions/config/models";
 const int ResponseBytes = 1_024;
 const int DefaultWarmup = 100;
 const int DefaultSamples = 1_000;
@@ -133,7 +134,7 @@ try
     Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
 
     await RunAdminUiSmokeAsync(routerUrl);
-    Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke)");
+    Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke, edit model list)");
     await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, slowRequest);
     Console.WriteLine("  concurrency: PASS (per-user limit rejects immediately without queueing)");
 
@@ -443,13 +444,40 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
             throw new InvalidOperationException("Admin users list did not show the edited user and its edit link.");
     }
 
+    string configHtml;
     using (HttpResponseMessage configPage = await client.GetAsync($"{routerUrl}/ui/admin/config"))
     {
         EnsureStatus(configPage, HttpStatusCode.OK, "config page");
-        string configHtml = await configPage.Content.ReadAsStringAsync();
+        configHtml = await configPage.Content.ReadAsStringAsync();
         if (!configHtml.Contains("name=\"listenUrl\"", StringComparison.Ordinal) ||
             !configHtml.Contains("Changes take effect after restart", StringComparison.Ordinal))
             throw new InvalidOperationException("Admin config page is missing the expected editor fields.");
+        if (!configHtml.Contains("name=\"models[0].alias\"", StringComparison.Ordinal) ||
+            !configHtml.Contains($"formaction=\"{AdminUiModelsActionPath}\"", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin config page has no indexed model row with an add control.");
+        if (configHtml.Contains("Remove model", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin config page offers to remove the only model row.");
+    }
+
+    // "Add model" round-trips the whole form to a dedicated endpoint that re-renders without saving.
+    using (var addModel = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}{AdminUiModelsActionPath}"))
+    {
+        addModel.Headers.Add("Origin", origin);
+        addModel.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["csrf"] = ExtractBetween(configHtml, "name=\"csrf\" value=\"", "\""),
+            ["action"] = "add",
+            ["models[0].alias"] = "perf",
+            ["models[0].upstreamModel"] = "deepseek-chat"
+        });
+        using HttpResponseMessage response = await client.SendAsync(addModel);
+        EnsureStatus(response, HttpStatusCode.OK, "add model row");
+        string addedHtml = await response.Content.ReadAsStringAsync();
+        if (!addedHtml.Contains("name=\"models[1].alias\"", StringComparison.Ordinal) ||
+            !addedHtml.Contains("Model #2", StringComparison.Ordinal) ||
+            !addedHtml.Contains("Model list updated", StringComparison.Ordinal) ||
+            addedHtml.Contains("Configuration saved", StringComparison.Ordinal))
+            throw new InvalidOperationException("Adding a model did not re-render an extra unsaved row.");
     }
 }
 

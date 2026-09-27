@@ -14,6 +14,7 @@ namespace RouterKely.Ui;
 public sealed class AdminUiService
 {
     public const string StylesheetPath = "/ui/assets/pico.classless-2.1.1.min.css";
+    public const string ModelsActionPath = "/ui/actions/config/models";
 
     private const string StylesheetResourceName = "RouterKely.Ui.pico.classless-2.1.1.min.css";
     private const string StylesheetEtag = "\"sha256-61207a40ffc02a42d1e50143651c121beab70ed413c934c1ff84fa263ba436b0\"";
@@ -317,7 +318,7 @@ public sealed class AdminUiService
         if (post is null)
             return;
 
-        ConfigForm form = ParseConfigForm(post.Form);
+        ConfigForm form = ConfigurationAdminService.FromForm(post.Form);
         try
         {
             _configurations.Save(form);
@@ -330,12 +331,49 @@ public sealed class AdminUiService
         }
     }
 
+    /// <summary>
+    /// Adds or removes a model row without saving. The browser posts the whole configuration form
+    /// to this endpoint, so an administrator can grow or shrink the model list and still review
+    /// every value before committing it with <see cref="SaveConfigAsync"/>.
+    /// </summary>
+    public async Task EditModelsAsync(HttpContext context)
+    {
+        PostContext? post = await RequireAdminPostAsync(context);
+        if (post is null)
+            return;
+
+        ConfigForm form = ConfigurationAdminService.FromForm(post.Form);
+        string? error = null;
+        if (string.Equals(post.Form["action"].ToString(), "add", StringComparison.Ordinal))
+        {
+            if (!ConfigurationAdminService.TryAddModel(form))
+                error = $"At most {RouterConfiguration.MaxModelRoutes} model routes are supported.";
+        }
+        else if (int.TryParse(
+            post.Form["removeIndex"].ToString(),
+            NumberStyles.None,
+            CultureInfo.InvariantCulture,
+            out int index))
+        {
+            ConfigurationAdminService.TryRemoveModel(form, index);
+        }
+
+        await WriteConfigFormAsync(
+            context,
+            post.Session,
+            form,
+            saved: false,
+            error: error,
+            notice: "Model list updated. Review the values, then save to write them to disk.");
+    }
+
     private async Task WriteConfigFormAsync(
         HttpContext context,
         UiSession session,
         ConfigForm form,
         bool saved,
-        string? error = null)
+        string? error = null,
+        string? notice = null)
     {
         var html = new StringBuilder(8_192);
         AppendAdminNav(html);
@@ -350,6 +388,8 @@ public sealed class AdminUiService
             html.Append("<p><mark>Configuration saved. Restart the router to apply.</mark></p>");
         if (error is not null)
             html.Append("<p><strong>").Append(Encode(error)).Append("</strong></p>");
+        else if (notice is not null)
+            html.Append("<p><mark>").Append(Encode(notice)).Append("</mark></p>");
 
         html.Append("<form method=\"post\" action=\"/ui/actions/config\">");
         AppendCsrf(html, session);
@@ -380,28 +420,43 @@ public sealed class AdminUiService
         html.Append("</fieldset>");
 
         html.Append("<fieldset><legend>Models</legend>");
+        html.Append("<p><small>One row per public alias. Add or remove rows, then save. "
+            + "At least one alias is required and aliases must be unique.</small></p>");
         for (int index = 0; index < form.Models.Length; index++)
         {
             ConfigModelForm model = form.Models[index];
+            string field = $"models[{index}].";
             html.Append("<fieldset><legend>Model #").Append(index + 1).Append("</legend>");
-            html.Append("<label>Alias <input name=\"models.alias\" required value=\"")
+            html.Append("<label>Alias <input name=\"").Append(field).Append("alias\" required value=\"")
                 .Append(Encode(model.Alias)).Append("\"></label>");
-            html.Append("<label>Upstream model <input name=\"models.upstreamModel\" required value=\"")
+            html.Append("<label>Upstream model <input name=\"").Append(field).Append("upstreamModel\" required value=\"")
                 .Append(Encode(model.UpstreamModel)).Append("\"></label>");
-            html.Append("<label>Input nanoUSD per million <input name=\"models.input\" type=\"number\" min=\"0\" required value=\"")
+            html.Append("<label>Input nanoUSD per million <input name=\"").Append(field).Append("input\" type=\"number\" min=\"0\" required value=\"")
                 .Append(Encode(model.InputUsdPerMillion)).Append("\"></label>");
-            html.Append("<label>Cached input nanoUSD per million <input name=\"models.cachedInput\" type=\"number\" min=\"0\" required value=\"")
+            html.Append("<label>Cached input nanoUSD per million <input name=\"").Append(field).Append("cachedInput\" type=\"number\" min=\"0\" required value=\"")
                 .Append(Encode(model.CachedInputUsdPerMillion)).Append("\"></label>");
-            html.Append("<label>Output nanoUSD per million <input name=\"models.output\" type=\"number\" min=\"0\" required value=\"")
+            html.Append("<label>Output nanoUSD per million <input name=\"").Append(field).Append("output\" type=\"number\" min=\"0\" required value=\"")
                 .Append(Encode(model.OutputUsdPerMillion)).Append("\"></label>");
-            html.Append("<label>Max input tokens <input name=\"models.maxInput\" type=\"number\" min=\"1\" value=\"")
+            html.Append("<label>Max input tokens <input name=\"").Append(field).Append("maxInput\" type=\"number\" min=\"1\" value=\"")
                 .Append(Encode(model.MaxInputTokens ?? string.Empty)).Append("\"></label>");
-            html.Append("<label>Max output tokens <input name=\"models.maxOutput\" type=\"number\" min=\"1\" value=\"")
+            html.Append("<label>Max output tokens <input name=\"").Append(field).Append("maxOutput\" type=\"number\" min=\"1\" value=\"")
                 .Append(Encode(model.MaxOutputTokens ?? string.Empty)).Append("\"></label>");
-            html.Append("<label><input type=\"checkbox\" name=\"models.supportsReasoning\" value=\"true\"")
+            html.Append("<label><input type=\"checkbox\" name=\"").Append(field).Append("supportsReasoning\" value=\"true\"")
                 .Append(model.SupportsReasoning ? " checked" : string.Empty)
                 .Append("> Supports reasoning</label>");
+            if (form.Models.Length > 1)
+            {
+                // formnovalidate keeps the round-trip working while other rows are still incomplete.
+                html.Append("<button type=\"submit\" name=\"removeIndex\" value=\"").Append(index)
+                    .Append("\" formaction=\"").Append(ModelsActionPath).Append("\" formnovalidate>Remove model #")
+                    .Append(index + 1).Append("</button>");
+            }
             html.Append("</fieldset>");
+        }
+        if (form.Models.Length < RouterConfiguration.MaxModelRoutes)
+        {
+            html.Append("<button type=\"submit\" name=\"action\" value=\"add\" formaction=\"").Append(ModelsActionPath)
+                .Append("\" formnovalidate>Add model</button>");
         }
         html.Append("</fieldset>");
 
@@ -431,66 +486,6 @@ public sealed class AdminUiService
         AppendLogout(html, session);
         await WritePageAsync(context, "Configuration", html.ToString());
     }
-
-    private static ConfigForm ParseConfigForm(IFormCollection form)
-    {
-        var parsed = new ConfigForm
-        {
-            ListenUrl = form["listenUrl"].ToString(),
-            ClientApiKey = form["clientApiKey"].ToString(),
-            UpstreamBaseUrl = form["upstreamBaseUrl"].ToString(),
-            UpstreamApiKey = form["upstreamApiKey"].ToString(),
-            UpstreamAllowInsecureLoopback = string.Equals(
-                form["upstreamAllowInsecureLoopback"].ToString(),
-                "true",
-                StringComparison.Ordinal),
-            IdentityMaxUsers = form["identityMaxUsers"].ToString(),
-            IdentityMaxKeys = form["identityMaxKeys"].ToString(),
-            DailyQuotaUsd = NullIfBlank(form["dailyQuotaUsd"].ToString()),
-            MaxRequestBodyBytes = form["maxRequestBodyBytes"].ToString(),
-            MaxModelPrefixBytes = form["maxModelPrefixBytes"].ToString(),
-            MaxConcurrentRequests = form["maxConcurrentRequests"].ToString(),
-            MaxConcurrentRequestsPerUser = NullIfBlank(form["maxConcurrentRequestsPerUser"].ToString()),
-            StatisticsFlushMs = form["statisticsFlushMs"].ToString(),
-            StatisticsHourlyHours = form["statisticsHourlyHours"].ToString(),
-            StatisticsDailyDays = form["statisticsDailyDays"].ToString(),
-        };
-
-        string[] aliases = form["models.alias"].ToArray()!;
-        string[] upstreamModels = form["models.upstreamModel"].ToArray()!;
-        string[] inputs = form["models.input"].ToArray()!;
-        string[] cachedInputs = form["models.cachedInput"].ToArray()!;
-        string[] outputs = form["models.output"].ToArray()!;
-        string[] maxInputs = form["models.maxInput"].ToArray()!;
-        string[] maxOutputs = form["models.maxOutput"].ToArray()!;
-        string[] reasonings = form["models.supportsReasoning"].ToArray()!;
-
-        int count = aliases.Length;
-        var models = new ConfigModelForm[count];
-        for (int index = 0; index < count; index++)
-        {
-            models[index] = new ConfigModelForm
-            {
-                Alias = Pick(aliases, index),
-                UpstreamModel = Pick(upstreamModels, index),
-                InputUsdPerMillion = Pick(inputs, index, "0"),
-                CachedInputUsdPerMillion = Pick(cachedInputs, index, "0"),
-                OutputUsdPerMillion = Pick(outputs, index, "0"),
-                MaxInputTokens = NullIfBlank(Pick(maxInputs, index, string.Empty)),
-                MaxOutputTokens = NullIfBlank(Pick(maxOutputs, index, string.Empty)),
-                SupportsReasoning = index < reasonings.Length &&
-                    string.Equals(reasonings[index], "true", StringComparison.Ordinal),
-            };
-        }
-        parsed.Models = models;
-        return parsed;
-    }
-
-    private static string Pick(string[] values, int index, string fallback = "") =>
-        index < values.Length ? values[index] : fallback;
-
-    private static string? NullIfBlank(string value) =>
-        string.IsNullOrWhiteSpace(value) ? null : value;
 
     private bool RequireAdmin(
         HttpContext context,

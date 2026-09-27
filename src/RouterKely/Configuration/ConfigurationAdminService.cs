@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 
 namespace RouterKely.Configuration;
 
@@ -198,6 +199,114 @@ public sealed class ConfigurationAdminService
             })
             .ToArray(),
     };
+
+    /// <summary>
+    /// Parses the administration UI configuration form. Model rows are addressed by index
+    /// (<c>models[0].alias</c>) rather than by parallel arrays, so any number of rows round-trips
+    /// correctly even though browsers omit unchecked checkboxes from the posted form.
+    /// </summary>
+    public static ConfigForm FromForm(IFormCollection form)
+    {
+        ArgumentNullException.ThrowIfNull(form);
+        return new ConfigForm
+        {
+            ListenUrl = form["listenUrl"].ToString(),
+            ClientApiKey = form["clientApiKey"].ToString(),
+            UpstreamBaseUrl = form["upstreamBaseUrl"].ToString(),
+            UpstreamApiKey = form["upstreamApiKey"].ToString(),
+            UpstreamAllowInsecureLoopback = string.Equals(
+                form["upstreamAllowInsecureLoopback"].ToString(),
+                "true",
+                StringComparison.Ordinal),
+            IdentityMaxUsers = form["identityMaxUsers"].ToString(),
+            IdentityMaxKeys = form["identityMaxKeys"].ToString(),
+            DailyQuotaUsd = NullIfBlank(form["dailyQuotaUsd"].ToString()),
+            MaxRequestBodyBytes = form["maxRequestBodyBytes"].ToString(),
+            MaxModelPrefixBytes = form["maxModelPrefixBytes"].ToString(),
+            MaxConcurrentRequests = form["maxConcurrentRequests"].ToString(),
+            MaxConcurrentRequestsPerUser = NullIfBlank(form["maxConcurrentRequestsPerUser"].ToString()),
+            StatisticsFlushMs = form["statisticsFlushMs"].ToString(),
+            StatisticsHourlyHours = form["statisticsHourlyHours"].ToString(),
+            StatisticsDailyDays = form["statisticsDailyDays"].ToString(),
+            Models = ParseModels(form),
+        };
+    }
+
+    /// <summary>Appends one blank model row; returns false at the configured cap.</summary>
+    public static bool TryAddModel(ConfigForm form)
+    {
+        ArgumentNullException.ThrowIfNull(form);
+        if (form.Models.Length >= RouterConfiguration.MaxModelRoutes)
+            return false;
+        form.Models = [.. form.Models, new ConfigModelForm()];
+        return true;
+    }
+
+    /// <summary>Removes the row at <paramref name="index"/>; returns false out of range or for the last row.</summary>
+    public static bool TryRemoveModel(ConfigForm form, int index)
+    {
+        ArgumentNullException.ThrowIfNull(form);
+        if (index < 0 || index >= form.Models.Length || form.Models.Length <= 1)
+            return false;
+        form.Models = [.. form.Models[..index], .. form.Models[(index + 1)..]];
+        return true;
+    }
+
+    private const string ModelPrefix = "models[";
+    private const string ModelAliasSuffix = "].alias";
+
+    private static ConfigModelForm[] ParseModels(IFormCollection form)
+    {
+        // Rows may be sparse after a remove round-trip, so trust the indices the browser sent
+        // instead of assuming a dense 0..n-1 range.
+        var indices = new SortedSet<int>();
+        foreach (string key in form.Keys)
+        {
+            if (TryParseModelIndex(key, out int index))
+                indices.Add(index);
+        }
+
+        var models = new ConfigModelForm[indices.Count];
+        int position = 0;
+        foreach (int index in indices)
+            models[position++] = ReadModel(form, index);
+        return models;
+    }
+
+    private static bool TryParseModelIndex(string key, out int index)
+    {
+        index = -1;
+        if (!key.StartsWith(ModelPrefix, StringComparison.Ordinal) ||
+            !key.EndsWith(ModelAliasSuffix, StringComparison.Ordinal))
+            return false;
+
+        ReadOnlySpan<char> digits = key.AsSpan(
+            ModelPrefix.Length,
+            key.Length - ModelPrefix.Length - ModelAliasSuffix.Length);
+        return digits.Length > 0 && int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out index);
+    }
+
+    private static ConfigModelForm ReadModel(IFormCollection form, int index)
+    {
+        string prefix = $"models[{index}].";
+        return new ConfigModelForm
+        {
+            Alias = form[prefix + "alias"].ToString(),
+            UpstreamModel = form[prefix + "upstreamModel"].ToString(),
+            InputUsdPerMillion = form[prefix + "input"].ToString(),
+            CachedInputUsdPerMillion = form[prefix + "cachedInput"].ToString(),
+            OutputUsdPerMillion = form[prefix + "output"].ToString(),
+            MaxInputTokens = NullIfBlank(form[prefix + "maxInput"].ToString()),
+            MaxOutputTokens = NullIfBlank(form[prefix + "maxOutput"].ToString()),
+            SupportsReasoning = string.Equals(
+                form[prefix + "supportsReasoning"].ToString(),
+                "true",
+                StringComparison.Ordinal),
+        };
+    }
+
+    private static string? NullIfBlank(string value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
 }
 
 public sealed class ConfigForm
