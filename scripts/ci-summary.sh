@@ -161,13 +161,14 @@ if [[ -n "$badge_dir" ]]; then
 
   mkdir -p "$badge_dir"
   alloc_numeric="${alloc_value//,/}"
+  p50_micros="$(awk -v x="$overhead_p50" 'BEGIN { printf "%d", int(x * 1000 + 0.5) }')"
   p50_color="$(awk -v x="$overhead_p50" 'BEGIN { print (x < 0.25 ? "brightgreen" : x < 0.5 ? "yellow" : "red") }')"
   allocation_color="$(awk -v x="$alloc_numeric" 'BEGIN { print (x <= 8192 ? "brightgreen" : x <= 10240 ? "yellow" : "red") }')"
   binary_color="$(awk -v x="$binary_value" 'BEGIN { print (x <= 20 ? "brightgreen" : x <= 22 ? "yellow" : "red") }')"
   tests_color="red"
   [[ "$unit_status" == "passed" ]] && tests_color="brightgreen"
 
-  printf '{"schemaVersion":1,"label":"p50 overhead","message":"%s ms","color":"%s"}\n' "$overhead_p50" "$p50_color" >"$badge_dir/p50.json"
+  printf '{"schemaVersion":1,"label":"p50 overhead","message":"%s µs","color":"%s"}\n' "$p50_micros" "$p50_color" >"$badge_dir/p50.json"
   printf '{"schemaVersion":1,"label":"alloc / request","message":"%s B","color":"%s"}\n' "$alloc_numeric" "$allocation_color" >"$badge_dir/allocation.json"
   printf '{"schemaVersion":1,"label":"binary size","message":"%s MiB","color":"%s"}\n' "$binary_value" "$binary_color" >"$badge_dir/binary.json"
   printf '{"schemaVersion":1,"label":"unit tests","message":"%s","color":"%s"}\n' "$unit_total" "$tests_color" >"$badge_dir/tests.json"
