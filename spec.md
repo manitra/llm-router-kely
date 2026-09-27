@@ -953,6 +953,8 @@ The environment administrator is merged into this document in memory after valid
 
 The repository-root `scripts/container/Dockerfile` builds the certified single-container deployment. Docker artifacts live under `scripts/container/` so the repository root stays limited to component folders and essential project files; the build context is still the repository root.
 
+Docker is used for exactly two purposes: publishing the certified image to GHCR, and deploying on Coolify. There is no local container workflow and no development Compose stack; local runs use `dotnet run`. The entrypoint and the health check are written inline by the Dockerfile rather than kept as separate files, so `scripts/container/` contains only the build and deployment artifacts.
+
 | Property | Value |
 |---|---|
 | Build command | `docker build -f scripts/container/Dockerfile .` |
@@ -965,6 +967,7 @@ The repository-root `scripts/container/Dockerfile` builds the certified single-c
 | Writable path | `/data` only, owned by `1654` with mode `0700`; the root filesystem is expected to be read-only |
 | Published port | `8080` |
 | Volume | `/data`, holding the configuration file and the identity file |
+| Labels | `org.opencontainers.image.*`, so the registry UI and `docker inspect` state the two required variables, the `/data` volume, and port `8080` |
 
 Alpine is the smallest official runtime-deps base that still ships a shell: 11.1 MiB against 12.0 MiB for `10.0-noble-chiseled`, which has no shell and therefore cannot run the entrypoint or the health check. The cost is musl instead of glibc, so measure before switching: a glibc base requires changing the base image and the runtime identifier together. Because the image is musl-based, the `linux-musl-*` runtime identifiers are mandatory and a `linux-x64` binary does not run in it.
 
@@ -987,11 +990,12 @@ Container behavior:
 - The configuration and identity files are read once at startup, so a change requires a container restart. The admin UI rewrites the identity file while the container runs, so it MUST NOT be edited concurrently: either manage users through the UI or stop the container first.
 - TLS is terminated by the platform reverse proxy. The container listener stays plain HTTP on the internal network and MUST NOT be published without TLS in front of it. The process listens on `0.0.0.0`, which the platform proxy requires.
 - On a platform that asks for a build context and a Dockerfile path separately, the context is the repository root and the Dockerfile path is `scripts/container/Dockerfile`.
-- `scripts/container-tests.sh` builds and verifies the image: build-context filtering, compose build settings, the declared image user, creation of the configuration file in the volume on first start, the unprivileged router process, read-only root filesystem, working health check, the environment administrator key accepted while an unconfigured key is rejected, operator configuration surviving a restart, refusal of an invalid configuration, the single exhaustive missing-variable report, and the unusable-volume diagnostic. Every check runs on every platform: an unusable volume is a root-owned Docker volume with a marker file, because Docker re-initializes an empty volume from the image and a Docker Desktop bind mount ignores ownership, either of which would mask the behaviour under test.
+- Coolify is the certified orchestrator. `scripts/container/coolify.compose.yml` builds the Dockerfile from the repository root, so any branch can be deployed without waiting for a published image. It has to follow three platform rules: it MUST declare the variable names so Coolify pre-creates the environment form and MUST NOT use a `${VAR:?}` interpolation guard, because Coolify interpolates the file before injecting its stored variables and the deploy would abort; it MUST use `expose` rather than a fixed host port, so the platform proxy assigns the port and terminates TLS; and it MUST NOT reference the published GHCR image, because the point of the Compose path is building the selected branch.
+- `scripts/container/image-tests.sh` builds and verifies the image: build-context filtering, the Coolify Compose settings, the declared image user, creation of the configuration file in the volume on first start, the unprivileged router process, read-only root filesystem, working health check, the environment administrator key accepted while an unconfigured key is rejected, operator configuration surviving a restart, refusal of an invalid configuration, the single exhaustive missing-variable report, and the unusable-volume diagnostic. Every check runs on every platform: an unusable volume is a root-owned Docker volume with a marker file, because Docker re-initializes an empty volume from the image and a Docker Desktop bind mount ignores ownership, either of which would mask the behaviour under test.
 
 ### 15.2 Published image
 
-The `container image` workflow publishes the certified deployment unit to GitHub Container Registry, which removes the build toolchain from the production host and makes the deployed binary the artifact CI verified. Deployments SHOULD pull it rather than rebuild from source.
+The `container image` workflow publishes the certified deployment unit to GitHub Container Registry, which removes the build toolchain from the production host and makes the deployed binary the artifact CI verified. Deployments that need reproducible, pre-verified artifacts SHOULD pull it; the Coolify Compose path builds the selected branch instead, which is what allows deploying an unreleased branch.
 
 | Property | Value |
 |---|---|
@@ -1355,12 +1359,10 @@ Recommended layout:
 /tests/RouterKely.Integration
 /tests/RouterKely.Performance
 /scripts/tests.sh               unit, AOT, integration, and performance suite
-/scripts/container-tests.sh     end-to-end container checks
+/scripts/container/image-tests.sh  end-to-end container image checks
 /scripts/container/Dockerfile   two-stage Alpine image, the certified deployment unit
 /scripts/container/Dockerfile.dockerignore   build-context filter for the Dockerfile
-/scripts/container/entrypoint.sh             volume ownership, first-boot seeding, secret guard
-/scripts/container/healthcheck.sh            readiness probe used by the image health check
-/scripts/container/compose.yml               local run of the same image
+/scripts/container/coolify.compose.yml       Coolify deployment; builds the Dockerfile from the repo root
 /.github/workflows/container-image.yml       publishes the multi-architecture image to GHCR
 /docs/compatibility
 /plugins/RouterKely.Postgres optional post-MVP adapter; absent from the default build

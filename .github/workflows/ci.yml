@@ -80,7 +80,7 @@ jobs:
           set -o pipefail
           # Capture stderr as well: the script reports failures on stderr, and tee alone
           # would only capture stdout.
-          ./scripts/container-tests.sh 2>&1 | tee scripts/.tmp-container-output.log
+          ./scripts/container/image-tests.sh 2>&1 | tee scripts/.tmp-container-output.log
 
       # The job log and the artifacts both require repository access, so the output is
       # also published to the public job summary to make failures diagnosable.

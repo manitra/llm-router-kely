@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# End-to-end check of the container wrapper: image build, first-boot seeding of the
-# persistent volume, environment-supplied secrets, and configuration validation.
-# Requires Docker, and is not part of scripts/tests.sh because building the image
-# runs a full Native AOT publish.
+# End-to-end check of the container image: build, first-boot seeding of the persistent
+# volume, environment-supplied secrets, and configuration validation. Requires Docker,
+# and is not part of scripts/tests.sh because building the image runs a full Native AOT
+# publish. The script sits next to the Dockerfile it builds, and its name distinguishes it
+# from the repo-level scripts/tests.sh.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+container_dir="$repo_root/scripts/container"
 work_dir="$(mktemp -d "$repo_root/scripts/.tmp-container-test.XXXXXX")"
 readonly image="llm-router-kely:container-test"
 readonly probe_image="llm-router-kely:ignore-probe"
@@ -116,7 +118,7 @@ prepare_unusable_volume() {
 # after it, so this guards against the rules silently going unused after a rename.
 assert_build_context_is_filtered() {
   echo "==> Asserting the build context excludes bin, obj, dotfiles, and local secrets"
-  local ignore_file="$repo_root/scripts/container/Dockerfile.dockerignore"
+  local ignore_file="$container_dir/Dockerfile.dockerignore"
   local probe_dir="$work_dir/ignore-probe"
   if [[ ! -f "$ignore_file" ]]; then
     fail "$ignore_file is missing, so BuildKit would send bin/, obj/, and local secrets as build context"
@@ -124,7 +126,7 @@ assert_build_context_is_filtered() {
   # Reuse the base the real build pulls anyway. Pulling a separate image from Docker Hub
   # would make this check, and therefore CI, depend on a rate-limited public registry.
   local probe_base
-  probe_base="$(sed -n 's/^FROM \(.*\) AS runtime$/\1/p' "$repo_root/scripts/container/Dockerfile" | head -1)"
+  probe_base="$(sed -n 's/^FROM \(.*\) AS runtime$/\1/p' "$container_dir/Dockerfile" | head -1)"
   [[ -n "$probe_base" ]] || fail "could not read the runtime base image from the Dockerfile"
   mkdir -p "$probe_dir/ctx/src/RouterKely/obj" "$probe_dir/ctx/.git" \
     "$probe_dir/ctx/config" "$probe_dir/ctx/scripts"
@@ -153,32 +155,47 @@ DOCKERFILE
   fi
 }
 
-# Coolify needs the repository root as the build context, because the Dockerfile
-# reads the application sources and the entrypoint scripts.
-assert_compose_build_context() {
-  echo "==> Asserting the compose file builds the relocated Dockerfile from the repo root"
+# Coolify is the only Compose consumer, and it builds the Dockerfile from the repository
+# root so any branch can be deployed. The file must not hard-code a GHCR image, and it
+# must declare both variable names for Coolify's env form and the /data volume. A
+# ${VAR:?} guard here would abort the deploy at interpolation time, before Coolify
+# injects its stored variables, so that is rejected too.
+assert_coolify_compose() {
+  echo "==> Asserting the Coolify compose file builds from the repository root"
   if ! docker compose version >/dev/null 2>&1; then
-    echo "    note: docker compose is unavailable; compose build settings check skipped"
+    echo "    note: docker compose is unavailable; Coolify compose check skipped"
     return 0
   fi
+  local file="$container_dir/coolify.compose.yml"
   local resolved
-  if ! resolved="$(ROUTERKELY_ADMIN_API_KEY=probe ROUTERKELY_DEEPSEEK_API_KEY=probe \
-      docker compose --file "$repo_root/scripts/container/compose.yml" config \
-      2>"$work_dir/compose.stderr")"; then
-    cat "$work_dir/compose.stderr" >&2
-    fail "the compose file is not valid"
+  if ! resolved="$(docker compose --file "$file" config 2>"$work_dir/coolify.stderr")"; then
+    cat "$work_dir/coolify.stderr" >&2
+    fail "the Coolify compose file is not valid"
   fi
   grep -qE "dockerfile: .*scripts/container/Dockerfile" <<< "$resolved" ||
-    fail "the compose file does not resolve the Dockerfile path"
+    fail "the Coolify compose file does not resolve the Dockerfile path"
   grep -q "context: $repo_root" <<< "$resolved" ||
-    fail "the compose file does not use the repository root as the build context"
+    fail "the Coolify compose file does not use the repository root as the build context"
+  grep -qE "image: ghcr.io/" <<< "$resolved" &&
+    fail "the Coolify compose file pulls a published image; it must build from source"
+  grep -q "ROUTERKELY_ADMIN_API_KEY" <<< "$resolved" ||
+    fail "the Coolify compose file does not declare ROUTERKELY_ADMIN_API_KEY"
+  grep -q "ROUTERKELY_DEEPSEEK_API_KEY" <<< "$resolved" ||
+    fail "the Coolify compose file does not declare ROUTERKELY_DEEPSEEK_API_KEY"
+  grep -qE "target: /data" <<< "$resolved" ||
+    fail "the Coolify compose file does not persist /data"
+  # Only inspect directives: the file's comment explains the guard, so grep would
+  # otherwise match the explanation rather than a real interpolation.
+  grep -v '^[[:space:]]*#' "$file" | grep -q ':?' &&
+    fail "the Coolify compose file uses a \${VAR:?} guard that breaks Coolify interpolation"
+  return 0
 }
 
 assert_build_context_is_filtered
-assert_compose_build_context
+assert_coolify_compose
 
 echo "==> Building $image"
-docker build --file "$repo_root/scripts/container/Dockerfile" --tag "$image" "$repo_root"
+docker build --file "$container_dir/Dockerfile" --tag "$image" "$repo_root"
 
 # The router must never run as root, and the image must not start as root either, because
 # a root entrypoint that claims the mounted volume would take the host directory away

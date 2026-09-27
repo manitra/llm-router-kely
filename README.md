@@ -40,37 +40,46 @@ dotnet run --project src/RouterKely/RouterKely.csproj --configuration Release
 
 ## Deploy
 
-Coolify and any Docker host build the image from `scripts/container/Dockerfile`; it runs unprivileged on Alpine. Docker stays out of the repository root, so nothing changes for the .NET workflow.
+Docker is used only to publish the image and to deploy on Coolify. There is no local container workflow: run the router with `dotnet run` during development.
+
+### Published image
+
+The `container image` workflow publishes a multi-architecture image to GitHub Container Registry on every push to `main` and on `v*` tags. Pulling it is the fastest deployment: the host downloads 26 MB instead of running a Native AOT compile, and it runs the exact artifact CI verified.
+
+A deployment must provide three things, or the container exits at startup:
+
+| Requirement | Why |
+|---|---|
+| `ROUTERKELY_ADMIN_API_KEY` | The administrator bearer key. Read at startup, never written to disk. |
+| `ROUTERKELY_DEEPSEEK_API_KEY` | The upstream credential. Read at startup, never written to disk. |
+| A volume mounted at `/data` | Holds the configuration file and the identity file the admin UI rewrites. |
 
 ```bash
-ROUTERKELY_ADMIN_API_KEY=sk-rk_... ROUTERKELY_DEEPSEEK_API_KEY=sk-... \
-  docker compose -f scripts/container/compose.yml up --build
-```
-
-The `container image` workflow publishes a multi-architecture image to GitHub Container Registry on every push to `main` and on `v*` tags. Pulling that image is the fastest deployment: the host downloads 26 MB instead of running a Native AOT compile, and it runs the exact artifact CI verified.
-
-```bash
-docker run -d --name router-kely -p 8080:8080 -v router-kely-data:/data \
+docker run -d --name router-kely -p 8080:8080 \
+  -v router-kely-data:/data \
   -e ROUTERKELY_ADMIN_API_KEY=sk-rk_... \
   -e ROUTERKELY_DEEPSEEK_API_KEY=sk-... \
   ghcr.io/manitra/llm-router-kely:latest
 ```
 
-Pin `:sha-<commit>` or a release tag such as `:1.2.3` for reproducible deployments and easy rollback.
+If a variable is missing the router refuses to start and names every one it needs in a single message. Pin `:sha-<commit>` or a release tag such as `:1.2.3` for reproducible deployments and easy rollback.
 
-Mount a persistent volume at `/data`. It holds `router-kely.local.json` and the `router-kely.identities.json` the admin UI rewrites. On the first start the container seeds the configuration from the image default; edit it and restart the container to apply changes, or manage users in the admin UI. Secrets live in the environment, never in the volume.
+The container also carries `org.opencontainers.image.description` and `...url` labels, so these requirements appear in the registry UI and in `docker inspect`.
 
-The container runs as the unprivileged `app` user (uid 1654) for its whole lifetime and never modifies the mounted directory. A Docker volume mounted at `/data` inherits the image's ownership and needs no preparation, which is what `docker run -v router-kely-data:/data` and Coolify's persistent storage provide. For a host bind mount, chown the directory to `1654:1654` first; the container refuses to start with that exact instruction if it cannot write to it.
+Use a **named** volume, not a host bind mount: a named volume inherits the ownership of the image's `/data` directory and needs no preparation. A bind mount must be chowned to `1654:1654` first, because the container runs unprivileged for its whole lifetime and never takes ownership of a mount. The container refuses to start with that exact instruction if it cannot write to `/data`.
 
-On Coolify, either:
+On the first start the router creates `/data/router-kely.local.json` from its embedded default. Edit it and restart the container to apply changes, or manage users in the admin UI. Secrets live in the environment, never in the volume.
 
-- **Dockerfile build pack** — **Base Directory** `/`, **Dockerfile Location** `/scripts/container/Dockerfile`; or
-- **Docker Image build pack** — image `ghcr.io/manitra/llm-router-kely:latest` to deploy the published artifact directly.
+### Coolify
 
-In both cases set the two secret variables, add a volume mount at `/data`, expose port `8080`, and deploy. The first deployment creates the configuration file in the volume for you to edit.
+Coolify builds the image from the branch you select and deploys it, so any branch or commit can be deployed without waiting for a published image. Set **Base Directory** `/` and **Compose Location** `/scripts/container/coolify.compose.yml`.
+
+Coolify's environment form already lists both secret names — fill in the values — and the Compose file declares the persistent `/data` volume, so there is nothing to add by hand. Coolify's proxy terminates TLS and assigns the host port, which is why the listener stays on plain HTTP port 8080.
+
+If you prefer to deploy the published image with no build, create the app with the **Docker Image** build pack using `ghcr.io/manitra/llm-router-kely:latest`, then add both variables, a persistent volume mounted at `/data`, and port `8080` manually.
 
 ## Maintain
 
-Run the complete unit, Native AOT, integration, and performance suite with `./scripts/tests.sh`, and the container checks with `./scripts/container-tests.sh`. Performance badges show the latest successful `main` run on GitHub-hosted Linux; enable GitHub Pages with **GitHub Actions** as its source to publish them.
+Run the complete unit, Native AOT, integration, and performance suite with `./scripts/tests.sh`, and the container image checks with `./scripts/container/image-tests.sh`. Performance badges show the latest successful `main` run on GitHub-hosted Linux; enable GitHub Pages with **GitHub Actions** as its source to publish them.
 
 See [spec.md](spec.md) for detailed specifications, contracts, and architecture.

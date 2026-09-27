@@ -1,0 +1,44 @@
+# Coolify deployment. Set this file as the Compose Location and leave the Base
+# Directory at "/" so the paths below resolve against the repository root.
+#
+# The build context is the repository root because the Dockerfile reads the
+# application sources. Building here instead of pulling the published image lets
+# Coolify deploy any branch or commit, not only what CI has already published to GHCR.
+# The operator only pastes the two secrets into Coolify's environment variable form
+# and adds a persistent volume mounted at /data. Nothing here requires a shell.
+#
+# Two rules this file has to follow, both specific to Coolify:
+#   - the environment values are bare names instead of ${VAR:?}. Coolify injects its
+#     stored variables into the container at runtime, after compose interpolation, so
+#     a hard guard would abort the deploy before a container ever starts;
+#   - no fixed host port. Coolify's proxy assigns one and routes TLS to the container,
+#     which is what keeps X-Forwarded-Proto and the same-origin check working.
+services:
+  router-kely:
+    build:
+      context: ../..
+      dockerfile: scripts/container/Dockerfile
+    image: router-kely:coolify
+    restart: unless-stopped
+    environment:
+      # Listed so Coolify pre-creates both rows in its env form; fill in the values.
+      ROUTERKELY_ADMIN_API_KEY:
+      ROUTERKELY_DEEPSEEK_API_KEY:
+    volumes:
+      # The named volume inherits the image's /data ownership, so the unprivileged
+      # container (uid 1654) can write it with no host preparation.
+      - router-kely-data:/data
+    expose:
+      - "8080"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  router-kely-data:
