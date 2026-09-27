@@ -1,6 +1,5 @@
-using RouterKely.Core.Authentication;
 using RouterKely.Core.Identity;
-using RouterKely.Core.Statistics;
+using RouterKely.Runtime;
 
 namespace RouterKely.Identity;
 
@@ -8,26 +7,23 @@ public sealed class IdentityAdminService
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly IIdentityProvider _provider;
-    private readonly ApiKeyAuthenticator _authenticator;
-    private readonly UsageAccumulator _usage;
+    private readonly RouterRuntime _runtime;
     private readonly ILogger _logger;
     private IdentitySnapshot _fileSnapshot;
 
     public IdentityAdminService(
         IIdentityProvider provider,
         IdentitySnapshot fileSnapshot,
-        ApiKeyAuthenticator authenticator,
-        UsageAccumulator usage,
+        RouterRuntime runtime,
         ILogger logger)
     {
         _provider = provider;
         _fileSnapshot = fileSnapshot;
-        _authenticator = authenticator;
-        _usage = usage;
+        _runtime = runtime;
         _logger = logger;
     }
 
-    public IdentitySnapshot Snapshot => _authenticator.Snapshot;
+    public IdentitySnapshot Snapshot => _runtime.Identities;
 
     public async ValueTask<IdentityUser> SaveUserAsync(
         long? userId,
@@ -131,7 +127,6 @@ public sealed class IdentityAdminService
             mutation,
             _fileSnapshot.Version,
             cancellationToken);
-        _authenticator.Update(_fileSnapshot);
-        _usage.UpdateIdentities(_authenticator.Snapshot);
+        _runtime.RefreshIdentities(_fileSnapshot);
     }
 }

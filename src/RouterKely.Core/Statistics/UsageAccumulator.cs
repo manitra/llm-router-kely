@@ -9,7 +9,7 @@ public sealed class UsageAccumulator
 {
     private static readonly int OutcomeCount = Enum.GetValues<UsageOutcome>().Length;
     private readonly object _gate = new();
-    private readonly ModelRoute[] _routes;
+    private ModelRoute[] _routes = [];
     private readonly Dictionary<long, DailyQuotaCounter> _quotas = [];
     private readonly Dictionary<long, ConcurrencyLimiter> _concurrencyLimiters = [];
     private readonly Dictionary<long, UsageAccount> _allAccounts = [];
@@ -21,9 +21,8 @@ public sealed class UsageAccumulator
         IdentitySnapshot identities,
         int maxConcurrentRequestsPerUser = 32)
     {
-        _routes = routes;
         MaxConcurrentRequestsPerUser = maxConcurrentRequestsPerUser;
-        UpdateIdentities(identities);
+        Update(routes, identities);
     }
 
     private int MaxConcurrentRequestsPerUser { get; }
@@ -31,10 +30,19 @@ public sealed class UsageAccumulator
     public bool TryGetAccount(long keyId, out UsageAccount? account) =>
         Volatile.Read(ref _activeAccounts).TryGetValue(keyId, out account);
 
-    public void UpdateIdentities(IdentitySnapshot identities)
+    /// <summary>
+    /// Adopts a route list and an identity snapshot. Counters are sized by route count, so a changed
+    /// list rebuilds the accounts; the daily quota and the concurrency limiter live outside the
+    /// account, so a user's spend and active slots survive the change and only aggregates not yet
+    /// flushed to statistics are reset.
+    /// </summary>
+    public void Update(ModelRoute[] routes, IdentitySnapshot identities)
     {
+        ArgumentNullException.ThrowIfNull(routes);
+        ArgumentNullException.ThrowIfNull(identities);
         lock (_gate)
         {
+            _routes = routes;
             foreach (IdentityUser user in identities.Users)
             {
                 if (!_concurrencyLimiters.ContainsKey(user.Id))
@@ -57,7 +65,8 @@ public sealed class UsageAccumulator
             {
                 if (!users.TryGetValue(key.UserId, out IdentityUser? user))
                     continue;
-                if (!_allAccounts.TryGetValue(key.Id, out UsageAccount? account))
+                if (!_allAccounts.TryGetValue(key.Id, out UsageAccount? account) ||
+                    account.RouteCount != _routes.Length)
                 {
                     account = new UsageAccount(
                         user.Id,
@@ -66,7 +75,7 @@ public sealed class UsageAccumulator
                         _concurrencyLimiters[user.Id],
                         _routes.Length,
                         OutcomeCount);
-                    _allAccounts.Add(key.Id, account);
+                    _allAccounts[key.Id] = account;
                 }
 
                 if (user.Enabled && key.Enabled)
@@ -80,12 +89,21 @@ public sealed class UsageAccumulator
 
     public UsageBatch ExchangePending(DateTimeOffset now)
     {
-        UsageAccount[] accounts = Volatile.Read(ref _accountSnapshot);
-        var entries = new List<UsageAggregate>(accounts.Length * _routes.Length);
+        // Read the accounts and the route list under one acquisition: accounts are only replaced
+        // together with the route list they were sized for, so the pair is always consistent.
+        UsageAccount[] accounts;
+        ModelRoute[] routes;
+        lock (_gate)
+        {
+            accounts = _accountSnapshot;
+            routes = _routes;
+        }
+
+        var entries = new List<UsageAggregate>(accounts.Length * routes.Length);
         DateTimeOffset hour = new(now.UtcDateTime.Date.AddHours(now.Hour), TimeSpan.Zero);
 
         foreach (UsageAccount account in accounts)
-            account.Exchange(hour, _routes, OutcomeCount, entries);
+            account.Exchange(hour, routes, OutcomeCount, entries);
 
         return new UsageBatch(entries.ToArray());
     }
@@ -109,12 +127,17 @@ public sealed class UsageAccount
         _userId = userId;
         _keyId = keyId;
         _outcomeCount = outcomeCount;
+        RouteCount = routeCount;
         Quota = quota;
         Concurrency = concurrency;
         _counters = Enumerable.Range(0, routeCount * outcomeCount)
             .Select(static _ => new UsageCounters())
             .ToArray();
     }
+
+    public long UserId => _userId;
+
+    public int RouteCount { get; }
 
     public DailyQuotaCounter Quota { get; }
 

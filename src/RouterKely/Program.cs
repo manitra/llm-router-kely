@@ -4,10 +4,10 @@ using RouterKely.Compatibility;
 using RouterKely.Configuration;
 using RouterKely.Core.Authentication;
 using RouterKely.Core.Identity;
-using RouterKely.Core.Routing;
 using RouterKely.Core.Statistics;
 using RouterKely.Identity;
 using RouterKely.Proxy;
+using RouterKely.Runtime;
 using RouterKely.Statistics;
 using RouterKely.Ui;
 
@@ -51,19 +51,6 @@ var client = new HttpClient(handler)
     Timeout = Timeout.InfiniteTimeSpan
 };
 
-ModelRoute[] routes = configuration.Models
-    .Select((model, index) => new ModelRoute(
-        index,
-        model.Alias,
-        model.UpstreamModel,
-        model.InputNanoUsdPerMillion,
-        model.CachedInputNanoUsdPerMillion,
-        model.OutputNanoUsdPerMillion,
-        model.MaxInputTokens,
-        model.MaxOutputTokens,
-        model.SupportsReasoning))
-    .ToArray();
-
 var identityProvider = new FileIdentityProvider(
     configuration.Identity.FilePath,
     configuration.Identity.MaxUsers,
@@ -71,17 +58,9 @@ var identityProvider = new FileIdentityProvider(
     configuration.Identity.EnvironmentAdminUserId,
     configuration.Identity.EnvironmentAdminKeyId);
 IdentitySnapshot fileIdentities = await identityProvider.LoadAsync(CancellationToken.None);
-var environmentAdmin = new IdentityUser(
-    configuration.Identity.EnvironmentAdminUserId,
-    configuration.Identity.EnvironmentAdminName,
-    configuration.Identity.EnvironmentAdminEmail,
-    IdentityRole.Admin,
-    true,
-    configuration.DailyQuotaNanoUsd,
-    true);
 var authenticator = new ApiKeyAuthenticator(
     configuration.ClientApiKey,
-    environmentAdmin,
+    RouterRuntime.CreateEnvironmentAdministrator(configuration),
     configuration.Identity.EnvironmentAdminKeyId,
     "Environment administrator",
     fileIdentities);
@@ -89,24 +68,24 @@ var statistics = new InMemoryStatisticsProvider(
     configuration.Statistics.HourlyRetentionHours,
     configuration.Statistics.DailyRetentionDays);
 var usage = new UsageAccumulator(
-    routes,
+    RouterRuntime.CreateRoutes(configuration),
     authenticator.Snapshot,
     configuration.EffectiveMaxConcurrentRequestsPerUser);
+var runtime = new RouterRuntime(
+    configPath,
+    identityProvider,
+    authenticator,
+    usage,
+    configuration);
 var proxy = new ProxyService(
     authenticator,
     client,
-    new Uri(configuration.Upstream.BaseUrl.EndsWith('/')
-        ? configuration.Upstream.BaseUrl
-        : configuration.Upstream.BaseUrl + '/'),
-    configuration.Upstream.ApiKey,
-    routes,
+    runtime,
     usage,
-    configuration.EffectiveMaxConcurrentRequests,
-    configuration.MaxRequestBodyBytes,
-    configuration.MaxModelPrefixBytes);
+    configuration.EffectiveMaxConcurrentRequests);
 var compatibility = new CompatibilityService(
     authenticator,
-    routes,
+    runtime,
     usage,
     statistics);
 
@@ -119,12 +98,11 @@ WebApplication app = builder.Build();
 var identityAdmin = new IdentityAdminService(
     identityProvider,
     fileIdentities,
-    authenticator,
-    usage,
+    runtime,
     app.Logger);
 var sessions = new UiSessionStore(authenticator);
 var configurations = new ConfigurationAdminService(configPath);
-var ui = new AdminUiService(authenticator, identityAdmin, configurations, sessions, app.Logger);
+var ui = new AdminUiService(authenticator, identityAdmin, configurations, sessions, runtime, app.Logger);
 
 app.MapGet("/", static () => Results.Text("Router Kely is running. Use /v1 as the OpenAI-compatible base path.\n"));
 app.MapGet("/health/live", static () => Results.Text("{\"status\":\"ok\"}", "application/json"));

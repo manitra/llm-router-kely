@@ -5,24 +5,25 @@ using System.Text.Json;
 using RouterKely.Core.Authentication;
 using RouterKely.Core.Routing;
 using RouterKely.Core.Statistics;
+using RouterKely.Runtime;
 
 namespace RouterKely.Compatibility;
 
 public sealed class CompatibilityService
 {
     private readonly ApiKeyAuthenticator _authenticator;
-    private readonly ModelRoute[] _routes;
+    private readonly RouterRuntime _runtime;
     private readonly UsageAccumulator _usage;
     private readonly IStatisticsProvider _statistics;
 
     public CompatibilityService(
         ApiKeyAuthenticator authenticator,
-        ModelRoute[] routes,
+        RouterRuntime runtime,
         UsageAccumulator usage,
         IStatisticsProvider statistics)
     {
         _authenticator = authenticator;
-        _routes = routes;
+        _runtime = runtime;
         _usage = usage;
         _statistics = statistics;
     }
@@ -36,7 +37,7 @@ public sealed class CompatibilityService
         await using var writer = new Utf8JsonWriter(context.Response.BodyWriter);
         writer.WriteStartObject();
         writer.WriteStartArray("data");
-        foreach (ModelRoute route in _routes)
+        foreach (ModelRoute route in _runtime.Current.Routes)
         {
             writer.WriteStartObject();
             writer.WriteString("model_name", route.Alias);
@@ -103,7 +104,7 @@ public sealed class CompatibilityService
         writer.WriteNumber("user_id", principal.User.Id);
         writer.WriteString("user_email", principal.User.Email);
         writer.WriteStartArray("models");
-        foreach (ModelRoute route in _routes)
+        foreach (ModelRoute route in _runtime.Current.Routes)
             writer.WriteStringValue(route.Alias);
         writer.WriteEndArray();
         writer.WriteNumber("spend", NanoUsdToUsd(usageNanoUsd));

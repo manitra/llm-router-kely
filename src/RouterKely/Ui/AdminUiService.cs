@@ -8,6 +8,7 @@ using RouterKely.Core.Authentication;
 using RouterKely.Core.Identity;
 using RouterKely.Core.Security;
 using RouterKely.Identity;
+using RouterKely.Runtime;
 
 namespace RouterKely.Ui;
 
@@ -26,6 +27,7 @@ public sealed class AdminUiService
     private readonly IdentityAdminService _identities;
     private readonly ConfigurationAdminService _configurations;
     private readonly UiSessionStore _sessions;
+    private readonly RouterRuntime _runtime;
     private readonly ILogger _logger;
     private readonly LoginRateLimiter _loginRateLimiter = new();
 
@@ -34,12 +36,14 @@ public sealed class AdminUiService
         IdentityAdminService identities,
         ConfigurationAdminService configurations,
         UiSessionStore sessions,
+        RouterRuntime runtime,
         ILogger logger)
     {
         _authenticator = authenticator;
         _identities = identities;
         _configurations = configurations;
         _sessions = sessions;
+        _runtime = runtime;
         _logger = logger;
     }
 
@@ -309,7 +313,7 @@ public sealed class AdminUiService
         }
 
         ConfigForm form = ConfigurationAdminService.ToForm(current);
-        await WriteConfigFormAsync(context, session!, form, saved: false);
+        await WriteConfigFormAsync(context, session!, form);
     }
 
     public async Task SaveConfigAsync(HttpContext context)
@@ -322,12 +326,28 @@ public sealed class AdminUiService
         try
         {
             _configurations.Save(form);
-            _logger.LogInformation("Administrator updated the configuration file.");
-            await WriteConfigFormAsync(context, post.Session, form, saved: true);
         }
         catch (InvalidOperationException exception)
         {
-            await WriteConfigFormAsync(context, post.Session, form, saved: false, error: exception.Message);
+            await WriteConfigFormAsync(context, post.Session, form, error: exception.Message);
+            return;
+        }
+
+        // The file is written; now make the running process use it. A failure here means the saved
+        // file is valid to write but not valid to start with, so report it instead of hiding it.
+        try
+        {
+            IReadOnlyList<string> restartRequired = await _runtime.ReloadAsync(context.RequestAborted);
+            _logger.LogInformation("Administrator updated the configuration file; it is now in effect.");
+            await WriteConfigFormAsync(context, post.Session, form, applied: true, restartRequired: restartRequired);
+        }
+        catch (InvalidOperationException exception)
+        {
+            await WriteConfigFormAsync(
+                context,
+                post.Session,
+                form,
+                error: $"Saved to disk, but not applied: {exception.Message}");
         }
     }
 
@@ -362,7 +382,6 @@ public sealed class AdminUiService
             context,
             post.Session,
             form,
-            saved: false,
             error: error,
             notice: "Model list updated. Review the values, then save to write them to disk.");
     }
@@ -371,7 +390,8 @@ public sealed class AdminUiService
         HttpContext context,
         UiSession session,
         ConfigForm form,
-        bool saved,
+        bool applied = false,
+        IReadOnlyList<string>? restartRequired = null,
         string? error = null,
         string? notice = null)
     {
@@ -381,11 +401,16 @@ public sealed class AdminUiService
         html.Append("<p><small>Saved file: <code>")
             .Append(Encode(_configurations.FilePath))
             .Append("</code></small></p>");
-        html.Append("<p><strong>Changes take effect after restart.</strong> "
-            + "Use <code>${NAME}</code> in any string field to reference an environment variable; "
-            + "the literal text is written to disk and the reference is resolved at startup.</p>");
-        if (saved)
-            html.Append("<p><mark>Configuration saved. Restart the router to apply.</mark></p>");
+        html.Append("<p>Use <code>${NAME}</code> in any string field to reference an environment "
+            + "variable; the literal text is written to disk and the reference is resolved on load.</p>");
+        if (applied)
+        {
+            html.Append(restartRequired is { Count: > 0 }
+                ? "<p><mark>Configuration saved and applied. Still needs a restart: "
+                    + Encode(string.Join(", ", restartRequired))
+                    + ".</mark></p>"
+                : "<p><mark>Configuration saved and applied. No restart needed.</mark></p>");
+        }
         if (error is not null)
             html.Append("<p><strong>").Append(Encode(error)).Append("</strong></p>");
         else if (notice is not null)

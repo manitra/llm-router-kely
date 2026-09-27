@@ -7,6 +7,7 @@ using RouterKely.Core.Authentication;
 using RouterKely.Core.Concurrency;
 using RouterKely.Core.Routing;
 using RouterKely.Core.Statistics;
+using RouterKely.Runtime;
 
 namespace RouterKely.Proxy;
 
@@ -14,34 +15,22 @@ public sealed class ProxyService
 {
     private readonly ApiKeyAuthenticator _authenticator;
     private readonly HttpClient _client;
-    private readonly Uri _upstreamBaseUri;
-    private readonly string _upstreamApiKey;
-    private readonly ModelRoute[] _routes;
+    private readonly RouterRuntime _runtime;
     private readonly UsageAccumulator _usage;
     private readonly ConcurrencyLimiter _concurrency;
-    private readonly int _maxRequestBodyBytes;
-    private readonly int _maxModelPrefixBytes;
 
     public ProxyService(
         ApiKeyAuthenticator authenticator,
         HttpClient client,
-        Uri upstreamBaseUri,
-        string upstreamApiKey,
-        ModelRoute[] routes,
+        RouterRuntime runtime,
         UsageAccumulator usage,
-        int maxConcurrentRequests,
-        int maxRequestBodyBytes,
-        int maxModelPrefixBytes)
+        int maxConcurrentRequests)
     {
         _authenticator = authenticator;
         _client = client;
-        _upstreamBaseUri = upstreamBaseUri;
-        _upstreamApiKey = upstreamApiKey;
-        _routes = routes;
+        _runtime = runtime;
         _usage = usage;
         _concurrency = new ConcurrencyLimiter(maxConcurrentRequests);
-        _maxRequestBodyBytes = maxRequestBodyBytes;
-        _maxModelPrefixBytes = maxModelPrefixBytes;
     }
 
     private bool TryAuthenticate(
@@ -74,7 +63,7 @@ public sealed class ProxyService
         writer.WriteStartObject();
         writer.WriteString("object", "list");
         writer.WriteStartArray("data");
-        foreach (ModelRoute route in _routes)
+        foreach (ModelRoute route in _runtime.Current.Routes)
         {
             writer.WriteStartObject();
             writer.WriteString("id", route.Alias);
@@ -90,6 +79,10 @@ public sealed class ProxyService
 
     public async Task ProxyChatCompletionsAsync(HttpContext context)
     {
+        // One read per request: an administrator saving the configuration mid-request changes the
+        // next request, never this one.
+        RouterSnapshot settings = _runtime.Current;
+
         if (!TryAuthenticate(context, out _, out UsageAccount? account) || account is null)
         {
             await WriteErrorAsync(context, 401, "invalid_api_key", "Invalid API key.");
@@ -102,7 +95,7 @@ public sealed class ProxyService
             return;
         }
 
-        if (context.Request.ContentLength > _maxRequestBodyBytes)
+        if (context.Request.ContentLength > settings.MaxRequestBodyBytes)
         {
             await WriteErrorAsync(context, 413, "request_too_large", "Request body is too large.");
             return;
@@ -130,7 +123,7 @@ public sealed class ProxyService
 
         try
         {
-            await ProxyAdmittedAsync(context, account, contentType);
+            await ProxyAdmittedAsync(context, account, contentType, settings);
         }
         finally
         {
@@ -139,9 +132,13 @@ public sealed class ProxyService
         }
     }
 
-    private async Task ProxyAdmittedAsync(HttpContext context, UsageAccount account, string contentType)
+    private async Task ProxyAdmittedAsync(
+        HttpContext context,
+        UsageAccount account,
+        string contentType,
+        RouterSnapshot settings)
     {
-        ModelRewritingContent? content = await CreateContentAsync(context);
+        ModelRewritingContent? content = await CreateContentAsync(context, settings);
         if (content is null)
             return;
 
@@ -149,11 +146,11 @@ public sealed class ProxyService
         long started = Stopwatch.GetTimestamp();
 
         using (content)
-        using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_upstreamBaseUri, "chat/completions")))
+        using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(settings.UpstreamBaseUri, "chat/completions")))
         {
             request.Version = HttpVersion.Version20;
             request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _upstreamApiKey);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.UpstreamApiKey);
             request.Headers.UserAgent.ParseAdd("router-kely/0.1");
             request.Content = content;
             content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
@@ -212,24 +209,24 @@ public sealed class ProxyService
         }
     }
 
-    private async Task<ModelRewritingContent?> CreateContentAsync(HttpContext context)
+    private async Task<ModelRewritingContent?> CreateContentAsync(HttpContext context, RouterSnapshot settings)
     {
-        byte[] prefix = ArrayPool<byte>.Shared.Rent(_maxModelPrefixBytes);
+        byte[] prefix = ArrayPool<byte>.Shared.Rent(settings.MaxModelPrefixBytes);
         int length = 0;
         bool ownershipTransferred = false;
         try
         {
-            while (length < _maxModelPrefixBytes)
+            while (length < settings.MaxModelPrefixBytes)
             {
                 int read = await context.Request.Body.ReadAsync(
-                    prefix.AsMemory(length, _maxModelPrefixBytes - length),
+                    prefix.AsMemory(length, settings.MaxModelPrefixBytes - length),
                     context.RequestAborted);
                 length += read;
 
                 ModelScanStatus status = ModelPrefixScanner.Scan(
                     prefix.AsSpan(0, length),
                     read == 0,
-                    _routes,
+                    settings.Routes,
                     out ModelRewrite rewrite);
 
                 switch (status)
@@ -241,7 +238,7 @@ public sealed class ProxyService
                             prefix,
                             length,
                             rewrite,
-                            _maxRequestBodyBytes);
+                            settings.MaxRequestBodyBytes);
                     case ModelScanStatus.UnknownModel:
                         await WriteErrorAsync(context, 404, "model_not_found", "Unknown model.");
                         return null;

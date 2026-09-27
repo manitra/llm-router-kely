@@ -10,6 +10,9 @@ using System.Text.Json;
 const string ApiKey = "sk-rk-performance-test";
 const string AdminUiStylesheetPath = "/ui/assets/pico.classless-2.1.1.min.css";
 const string AdminUiModelsActionPath = "/ui/actions/config/models";
+const string MockUpstreamApiKey = "mock-upstream-key";
+const string PerfAlias = "perf";
+const string PerfUpstreamModel = "deepseek-chat";
 const int ResponseBytes = 1_024;
 const int DefaultWarmup = 100;
 const int DefaultSamples = 1_000;
@@ -133,8 +136,8 @@ try
     Console.WriteLine($"  files:      {publishedFiles.Length:N0} published | required {ExpectedPublishedFileCount} => {(fileCountPass ? "PASS" : "MISS")} (enforced)");
     Console.WriteLine($"  constraint: p50 < 0.250 ms and p99 < 1.000 ms => {(overheadP50 < 0.250 && overheadP99 < 1.000 ? "PASS" : "MISS")}{(enforce ? " (enforced)" : " (informational)")}");
 
-    await RunAdminUiSmokeAsync(routerUrl);
-    Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke, edit model list)");
+    await RunAdminUiSmokeAsync(routerUrl, mockUrl);
+    Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke, edit+save model list)");
     await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, slowRequest);
     Console.WriteLine("  concurrency: PASS (per-user limit rejects immediately without queueing)");
 
@@ -216,15 +219,15 @@ static string WriteConfiguration(string directory, string routerUrl, string mock
             upstream = new
             {
                 baseUrl = $"{mockUrl}/v1/",
-                apiKey = "mock-upstream-key",
+                apiKey = MockUpstreamApiKey,
                 allowInsecureLoopback = true
             },
             models = new[]
             {
                 new
                 {
-                    alias = "perf",
-                    upstreamModel = "deepseek-chat",
+                    alias = PerfAlias,
+                    upstreamModel = PerfUpstreamModel,
                     inputNanoUsdPerMillion = 1_000_000_000L,
                     cachedInputNanoUsdPerMillion = 100_000_000L,
                     outputNanoUsdPerMillion = 2_000_000_000L
@@ -290,7 +293,7 @@ static HttpClient CreateClient(int maxConnectionsPerServer = 1)
     return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
 }
 
-static async Task RunAdminUiSmokeAsync(string routerUrl)
+static async Task RunAdminUiSmokeAsync(string routerUrl, string mockUrl)
 {
     var handler = new SocketsHttpHandler
     {
@@ -449,8 +452,7 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
     {
         EnsureStatus(configPage, HttpStatusCode.OK, "config page");
         configHtml = await configPage.Content.ReadAsStringAsync();
-        if (!configHtml.Contains("name=\"listenUrl\"", StringComparison.Ordinal) ||
-            !configHtml.Contains("Changes take effect after restart", StringComparison.Ordinal))
+        if (!configHtml.Contains("name=\"listenUrl\"", StringComparison.Ordinal))
             throw new InvalidOperationException("Admin config page is missing the expected editor fields.");
         if (!configHtml.Contains("name=\"models[0].alias\"", StringComparison.Ordinal) ||
             !configHtml.Contains($"formaction=\"{AdminUiModelsActionPath}\"", StringComparison.Ordinal))
@@ -463,13 +465,7 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
     using (var addModel = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}{AdminUiModelsActionPath}"))
     {
         addModel.Headers.Add("Origin", origin);
-        addModel.Content = new FormUrlEncodedContent(new Dictionary<string, string>
-        {
-            ["csrf"] = ExtractBetween(configHtml, "name=\"csrf\" value=\"", "\""),
-            ["action"] = "add",
-            ["models[0].alias"] = "perf",
-            ["models[0].upstreamModel"] = "deepseek-chat"
-        });
+        addModel.Content = new FormUrlEncodedContent(ConfigForm(configHtml, routerUrl, mockUrl, "perf-two", action: "add"));
         using HttpResponseMessage response = await client.SendAsync(addModel);
         EnsureStatus(response, HttpStatusCode.OK, "add model row");
         string addedHtml = await response.Content.ReadAsStringAsync();
@@ -479,6 +475,72 @@ static async Task RunAdminUiSmokeAsync(string routerUrl)
             addedHtml.Contains("Configuration saved", StringComparison.Ordinal))
             throw new InvalidOperationException("Adding a model did not re-render an extra unsaved row.");
     }
+
+    // Saving must reach the running process: the added alias answers on /v1/models immediately.
+    using (var saveConfig = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/config"))
+    {
+        saveConfig.Headers.Add("Origin", origin);
+        saveConfig.Content = new FormUrlEncodedContent(ConfigForm(configHtml, routerUrl, mockUrl, "perf-two"));
+        using HttpResponseMessage response = await client.SendAsync(saveConfig);
+        EnsureStatus(response, HttpStatusCode.OK, "save configuration");
+        string savedHtml = await response.Content.ReadAsStringAsync();
+        if (!savedHtml.Contains("Configuration saved and applied. No restart needed", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin config save did not report an immediate apply.");
+    }
+
+    using (var models = new HttpRequestMessage(HttpMethod.Get, $"{routerUrl}/v1/models"))
+    {
+        models.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
+        using HttpResponseMessage response = await client.SendAsync(models);
+        EnsureStatus(response, HttpStatusCode.OK, "model list after save");
+        string modelsJson = await response.Content.ReadAsStringAsync();
+        if (!modelsJson.Contains("\"perf-two\"", StringComparison.Ordinal))
+            throw new InvalidOperationException("The saved configuration is not live without a restart.");
+    }
+}
+
+// Posts the whole configuration form, keeping every field at the value the running process was
+// started with except the second model alias. Only settings that are fixed at startup are left
+// unchanged, so a successful save reports no restart requirement.
+static Dictionary<string, string> ConfigForm(
+    string configHtml,
+    string routerUrl,
+    string mockUrl,
+    string secondAlias,
+    string? action = null)
+{
+    var fields = new Dictionary<string, string>
+    {
+        ["csrf"] = ExtractBetween(configHtml, "name=\"csrf\" value=\"", "\""),
+        ["listenUrl"] = routerUrl,
+        ["clientApiKey"] = ApiKey,
+        ["upstreamBaseUrl"] = $"{mockUrl}/v1/",
+        ["upstreamApiKey"] = MockUpstreamApiKey,
+        ["upstreamAllowInsecureLoopback"] = "true",
+        ["identityMaxUsers"] = "256",
+        ["identityMaxKeys"] = "1024",
+        ["maxRequestBodyBytes"] = "33554432",
+        ["maxModelPrefixBytes"] = "65536",
+        ["maxConcurrentRequests"] = "2",
+        ["maxConcurrentRequestsPerUser"] = "1",
+        ["statisticsFlushMs"] = "1000",
+        ["statisticsHourlyHours"] = "72",
+        ["statisticsDailyDays"] = "7",
+        ["models[0].alias"] = PerfAlias,
+        ["models[0].upstreamModel"] = PerfUpstreamModel,
+        ["models[0].input"] = "1000000000",
+        ["models[0].cachedInput"] = "100000000",
+        ["models[0].output"] = "2000000000",
+        ["models[1].alias"] = secondAlias,
+        ["models[1].upstreamModel"] = "deepseek-reasoner",
+        ["models[1].input"] = "1000000000",
+        ["models[1].cachedInput"] = "0",
+        ["models[1].output"] = "2000000000"
+    };
+
+    if (action is not null)
+        fields["action"] = action;
+    return fields;
 }
 
 static async Task RunConcurrencySmokeAsync(

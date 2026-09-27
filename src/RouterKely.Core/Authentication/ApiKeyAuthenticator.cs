@@ -8,8 +8,10 @@ namespace RouterKely.Core.Authentication;
 
 public sealed class ApiKeyAuthenticator
 {
-    private readonly IdentityUser _environmentUser;
-    private readonly IdentityKey _environmentKey;
+    private readonly long _environmentKeyId;
+    private readonly string _environmentKeyName;
+    private IdentityUser _environmentUser;
+    private IdentityKey _environmentKey;
     private RuntimeSnapshot _runtime;
 
     public ApiKeyAuthenticator(string apiKey)
@@ -29,19 +31,11 @@ public sealed class ApiKeyAuthenticator
         string environmentKeyName,
         IdentitySnapshot fileSnapshot)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        ArgumentNullException.ThrowIfNull(environmentUser);
+        _environmentKeyId = environmentKeyId;
+        _environmentKeyName = environmentKeyName;
         _environmentUser = environmentUser with { IsEnvironment = true };
-        byte[] hash = SHA256.HashData(Encoding.ASCII.GetBytes(apiKey));
-        _environmentKey = new IdentityKey(
-            environmentKeyId,
-            environmentUser.Id,
-            environmentKeyName,
-            Convert.ToHexStringLower(hash),
-            apiKey[..Math.Min(11, apiKey.Length)],
-            apiKey.Length >= 4 ? apiKey[^4..] : apiKey,
-            true,
-            true);
-        CryptographicOperations.ZeroMemory(hash);
+        _environmentKey = CreateEnvironmentKey(environmentUser.Id, apiKey);
         _runtime = Build(fileSnapshot);
     }
 
@@ -102,8 +96,44 @@ public sealed class ApiKeyAuthenticator
         return false;
     }
 
+    /// <summary>Rebuilds the key lookup after the identity file changed.</summary>
     public void Update(IdentitySnapshot fileSnapshot) =>
         Volatile.Write(ref _runtime, Build(fileSnapshot));
+
+    /// <summary>
+    /// Replaces the environment-supplied administrator credential and rebuilds the lookup in one
+    /// swap, so a rotated <c>clientApiKey</c> takes effect immediately and the previous key stops
+    /// authenticating.
+    /// </summary>
+    public void Update(string apiKey, IdentityUser environmentUser, IdentitySnapshot fileSnapshot)
+    {
+        ArgumentNullException.ThrowIfNull(environmentUser);
+        _environmentUser = environmentUser with { IsEnvironment = true };
+        _environmentKey = CreateEnvironmentKey(environmentUser.Id, apiKey);
+        Update(fileSnapshot);
+    }
+
+    private IdentityKey CreateEnvironmentKey(long userId, string apiKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        byte[] hash = SHA256.HashData(Encoding.ASCII.GetBytes(apiKey));
+        try
+        {
+            return new IdentityKey(
+                _environmentKeyId,
+                userId,
+                _environmentKeyName,
+                Convert.ToHexStringLower(hash),
+                apiKey[..Math.Min(11, apiKey.Length)],
+                apiKey.Length >= 4 ? apiKey[^4..] : apiKey,
+                true,
+                true);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(hash);
+        }
+    }
 
     private RuntimeSnapshot Build(IdentitySnapshot fileSnapshot)
     {
