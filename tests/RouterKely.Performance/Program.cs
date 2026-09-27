@@ -2,18 +2,13 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
+using static Harness;
 
 const string ApiKey = "sk-rk-performance-test";
 const string AdminUiStylesheetPath = "/ui/assets/pico.classless-2.1.1.min.css";
 const string AdminUiModelsActionPath = "/ui/actions/config/models";
-const string MockUpstreamApiKey = "mock-upstream-key";
-const string PerfAlias = "perf";
-const string PerfUpstreamModel = "deepseek-chat";
-const int ResponseBytes = 1_024;
+const int ResponseBytes = MockUpstream.ResponseBytes;
 const int DefaultWarmup = 100;
 const int DefaultSamples = 1_000;
 const long MaxIdleWorkingSetBytes = 100L * 1_024 * 1_024;
@@ -65,11 +60,18 @@ Directory.CreateDirectory(temporaryDirectory);
 
 WebApplication? mock = null;
 Process? router = null;
-var slowRequest = new SlowRequestGate();
+var gate = new ConcurrencyGate();
 try
 {
-    mock = await StartMockUpstreamAsync(mockUrl, slowRequest);
-    string configurationPath = WriteConfiguration(temporaryDirectory, routerUrl, mockUrl);
+    mock = await MockUpstream.StartAsync(mockUrl, gate, delayMilliseconds: 0);
+    string configurationPath = WriteConfiguration(
+        temporaryDirectory,
+        "router-kely.performance.json",
+        routerUrl,
+        mockUrl,
+        ApiKey,
+        maxConcurrentRequests: 2,
+        maxConcurrentRequestsPerUser: 1);
     router = StartRouter(routerExecutable, configurationPath);
 
     using var directClient = CreateClient();
@@ -138,8 +140,11 @@ try
 
     await RunAdminUiSmokeAsync(routerUrl, mockUrl);
     Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke, edit+save model list)");
-    await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, slowRequest);
+    await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, gate);
     Console.WriteLine("  concurrency: PASS (per-user limit rejects immediately without queueing)");
+
+    ParallelSmokeReport parallel = await ParallelSmoke.RunAsync(routerExecutable, temporaryDirectory);
+    Console.WriteLine($"  parallel:   {parallel.Detail} in {parallel.ElapsedMilliseconds / 1_000d:F1} s");
 
     if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass)
         return 1;
@@ -167,131 +172,6 @@ finally
 }
 
 return 0;
-
-static async Task<WebApplication> StartMockUpstreamAsync(string url, SlowRequestGate slowRequest)
-{
-    WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
-    builder.Logging.ClearProviders();
-    builder.WebHost.UseUrls(url);
-    WebApplication app = builder.Build();
-    byte[] response = CreateResponseBody();
-
-    app.MapPost("/v1/chat/completions", async context =>
-    {
-        await context.Request.Body.CopyToAsync(Stream.Null, context.RequestAborted);
-        if (context.Request.Headers.Accept == "application/x-router-kely-hold")
-        {
-            slowRequest.Started.TrySetResult();
-            await slowRequest.Release.Task.WaitAsync(context.RequestAborted);
-        }
-        context.Response.StatusCode = StatusCodes.Status200OK;
-        context.Response.ContentType = "application/json";
-        context.Response.ContentLength = response.Length;
-        await context.Response.Body.WriteAsync(response, context.RequestAborted);
-    });
-
-    await app.StartAsync();
-    return app;
-}
-
-static byte[] CreateResponseBody()
-{
-    const string json = "{\"id\":\"perf\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":0}}";
-    byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
-    if (jsonBytes.Length > ResponseBytes)
-        throw new InvalidOperationException("Mock response exceeds its fixed size.");
-
-    byte[] response = new byte[ResponseBytes];
-    jsonBytes.CopyTo(response, 0);
-    response.AsSpan(jsonBytes.Length).Fill((byte)' ');
-    return response;
-}
-
-static string WriteConfiguration(string directory, string routerUrl, string mockUrl)
-{
-    string path = Path.Combine(directory, "router-kely.performance.json");
-    var configuration = new
-    {
-        routerKely = new
-        {
-            listenUrl = routerUrl,
-            clientApiKey = ApiKey,
-            upstream = new
-            {
-                baseUrl = $"{mockUrl}/v1/",
-                apiKey = MockUpstreamApiKey,
-                allowInsecureLoopback = true
-            },
-            models = new[]
-            {
-                new
-                {
-                    alias = PerfAlias,
-                    upstreamModel = PerfUpstreamModel,
-                    inputNanoUsdPerMillion = 1_000_000_000L,
-                    cachedInputNanoUsdPerMillion = 100_000_000L,
-                    outputNanoUsdPerMillion = 2_000_000_000L
-                }
-            },
-            dailyQuotaNanoUsd = (long?)null,
-            statistics = new
-            {
-                flushIntervalMilliseconds = 1_000,
-                hourlyRetentionHours = 72,
-                dailyRetentionDays = 7
-            },
-            maxRequestBodyBytes = 33_554_432,
-            maxModelPrefixBytes = 65_536,
-            maxConcurrentRequests = 2,
-            maxConcurrentRequestsPerUser = 1
-        }
-    };
-
-    File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(configuration));
-    return path;
-}
-
-static Process StartRouter(string executable, string configurationPath)
-{
-    var start = new ProcessStartInfo(executable)
-    {
-        RedirectStandardError = true,
-        RedirectStandardOutput = true,
-        UseShellExecute = false
-    };
-    start.Environment["ROUTERKELY_CONFIG"] = configurationPath;
-    start.Environment["ROUTERKELY_BENCHMARK_METRICS"] = "true";
-    start.Environment["Logging__LogLevel__Default"] = "Warning";
-
-    Process process = Process.Start(start)
-        ?? throw new InvalidOperationException("Failed to start Router Kely.");
-    process.OutputDataReceived += static (_, eventArgs) =>
-    {
-        if (eventArgs.Data is not null)
-            Console.WriteLine($"  router: {eventArgs.Data}");
-    };
-    process.ErrorDataReceived += static (_, eventArgs) =>
-    {
-        if (eventArgs.Data is not null)
-            Console.Error.WriteLine($"  router: {eventArgs.Data}");
-    };
-    process.BeginOutputReadLine();
-    process.BeginErrorReadLine();
-    return process;
-}
-
-static HttpClient CreateClient(int maxConnectionsPerServer = 1)
-{
-    var handler = new SocketsHttpHandler
-    {
-        AllowAutoRedirect = false,
-        AutomaticDecompression = DecompressionMethods.None,
-        MaxConnectionsPerServer = maxConnectionsPerServer,
-        UseCookies = false,
-        UseProxy = false
-    };
-    return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
-}
 
 static async Task RunAdminUiSmokeAsync(string routerUrl, string mockUrl)
 {
@@ -515,7 +395,7 @@ static Dictionary<string, string> ConfigForm(
         ["listenUrl"] = routerUrl,
         ["clientApiKey"] = ApiKey,
         ["upstreamBaseUrl"] = $"{mockUrl}/v1/",
-        ["upstreamApiKey"] = MockUpstreamApiKey,
+        ["upstreamApiKey"] = Harness.MockUpstreamApiKey,
         ["upstreamAllowInsecureLoopback"] = "true",
         ["identityMaxUsers"] = "256",
         ["identityMaxKeys"] = "1024",
@@ -526,8 +406,8 @@ static Dictionary<string, string> ConfigForm(
         ["statisticsFlushMs"] = "1000",
         ["statisticsHourlyHours"] = "72",
         ["statisticsDailyDays"] = "7",
-        ["models[0].alias"] = PerfAlias,
-        ["models[0].upstreamModel"] = PerfUpstreamModel,
+        ["models[0].alias"] = Harness.PerfAlias,
+        ["models[0].upstreamModel"] = Harness.PerfUpstreamModel,
         ["models[0].input"] = "1000000000",
         ["models[0].cachedInput"] = "100000000",
         ["models[0].output"] = "2000000000",
@@ -547,10 +427,10 @@ static async Task RunConcurrencySmokeAsync(
     HttpClient client,
     Uri endpoint,
     byte[] requestBody,
-    SlowRequestGate slowRequest)
+    ConcurrencyGate gate)
 {
     Task<HttpResponseMessage> firstRequest = SendHoldRequestAsync(client, endpoint, requestBody);
-    await slowRequest.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await gate.WaitForActiveAsync(1, TimeSpan.FromSeconds(5));
     try
     {
         using HttpResponseMessage rejected = await SendHoldRequestAsync(client, endpoint, requestBody);
@@ -558,7 +438,7 @@ static async Task RunConcurrencySmokeAsync(
     }
     finally
     {
-        slowRequest.Release.TrySetResult();
+        gate.Release();
     }
 
     using HttpResponseMessage admitted = await firstRequest;
@@ -576,15 +456,8 @@ static async Task<HttpResponseMessage> SendHoldRequestAsync(
     };
     request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
     request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
-    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-router-kely-hold"));
+    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(MockUpstream.HoldHeader));
     return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-}
-
-static void EnsureStatus(HttpResponseMessage response, HttpStatusCode expected, string operation)
-{
-    if (response.StatusCode != expected)
-        throw new InvalidOperationException(
-            $"Admin UI smoke failed during {operation}: expected {(int)expected}, received {(int)response.StatusCode}.");
 }
 
 static string ExtractBetween(string value, string start, string end)
@@ -597,30 +470,6 @@ static string ExtractBetween(string value, string start, string end)
     if (endIndex < 0)
         throw new InvalidOperationException($"Admin UI smoke could not find '{end}'.");
     return value[startIndex..endIndex];
-}
-
-static async Task WaitUntilReadyAsync(HttpClient client, Uri endpoint, Process router)
-{
-    long deadline = Stopwatch.GetTimestamp() + (10 * Stopwatch.Frequency);
-    while (Stopwatch.GetTimestamp() < deadline)
-    {
-        if (router.HasExited)
-            throw new InvalidOperationException($"Router Kely exited during startup with code {router.ExitCode}.");
-
-        try
-        {
-            using HttpResponseMessage response = await client.GetAsync(endpoint);
-            if (response.IsSuccessStatusCode)
-                return;
-        }
-        catch (HttpRequestException)
-        {
-        }
-
-        await Task.Delay(25);
-    }
-
-    throw new TimeoutException("Router Kely did not become ready within 10 seconds.");
 }
 
 static async Task<double> MeasureAsync(HttpClient client, Uri endpoint, byte[] requestBody, bool authorize)
@@ -653,23 +502,6 @@ static async Task<long> ReadAllocatedBytesAsync(HttpClient client, Uri endpoint)
 {
     string value = await client.GetStringAsync(endpoint);
     return long.Parse(value, NumberStyles.None, CultureInfo.InvariantCulture);
-}
-
-static int ReserveLoopbackPort()
-{
-    var listener = new TcpListener(IPAddress.Loopback, 0);
-    listener.Start();
-    int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-    listener.Stop();
-    return port;
-}
-
-static int ReadPositiveInteger(string name, int defaultValue)
-{
-    string? raw = Environment.GetEnvironmentVariable(name);
-    return int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out int value) && value > 0
-        ? value
-        : defaultValue;
 }
 
 static string FormatMiB(long bytes) =>
@@ -705,11 +537,4 @@ readonly record struct Metrics(double P50, double P95, double P99)
         int index = Math.Clamp((int)Math.Ceiling(sorted.Length * percentile) - 1, 0, sorted.Length - 1);
         return sorted[index];
     }
-}
-
-sealed class SlowRequestGate
-{
-    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 }

@@ -71,6 +71,7 @@ read -r files_value files_limit files_result <<<"$(extract 's/.*files:[[:space:]
 constraint_result="$(extract 's/.*constraint:.*=> (PASS|MISS).*/\1/p')"
 admin_result="$(extract 's/.*admin UI:[[:space:]]+(PASS).*/\1/p')"
 concurrency_result="$(extract 's/.*concurrency:[[:space:]]+(PASS).*/\1/p')"
+parallel_result="$(extract 's/.*parallel:[[:space:]]+(PASS).*/\1/p')"
 
 unit_line="$(grep -E '^(Passed|Failed)! *-' "$log" | tail -1 || true)"
 unit_parsed=0
@@ -152,6 +153,7 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
     "$(value_or_dash "$overhead_p50")" "$(value_or_dash "$overhead_p99")" "$(icon "$constraint_result")"
   printf '| Admin UI smoke | %s | — | %s |\n' "$(value_or_dash "$admin_result")" "$(icon "$admin_result")"
   printf '| Concurrency smoke | %s | — | %s |\n' "$(value_or_dash "$concurrency_result")" "$(icon "$concurrency_result")"
+  printf '| Parallel concurrency smoke | %s | — | %s |\n' "$(value_or_dash "$parallel_result")" "$(icon "$parallel_result")"
 } >>"$summary"
 
 if [[ -n "$badge_dir" ]]; then
