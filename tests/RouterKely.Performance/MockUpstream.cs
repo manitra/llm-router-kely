@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Text;
+using Microsoft.Extensions.Primitives;
 
 /// <summary>
 /// Deterministic loopback upstream. It holds a request open on demand (so a caller can fill the
@@ -17,6 +18,11 @@ internal static class MockUpstream
     internal const string LargeUpstreamModel = "deepseek-large";
     internal const string HugeUpstreamModel = "deepseek-huge";
     internal const string HoldHeader = "application/x-router-kely-hold";
+    /// <summary>Selects the scripted Server-Sent-Events response.</summary>
+    internal const string StreamHeader = "application/x-router-kely-stream";
+    internal const int StreamChunks = 10;
+    internal const int StreamChunkDelayMilliseconds = 20;
+    internal const string StreamDone = "data: [DONE]";
     private const int MaxScannedBodyBytes = 4_096;
     private static readonly byte[] UserMarker = "\"user\":\""u8.ToArray();
     private static readonly byte[] ModelMarker = "\"model\":\""u8.ToArray();
@@ -37,6 +43,12 @@ internal static class MockUpstream
             gate.Enter();
             try
             {
+                if (IsStreamRequest(context.Request.Headers.Accept))
+                {
+                    await WriteStreamAsync(context.Response, id, context.RequestAborted);
+                    return;
+                }
+
                 if (context.Request.Headers.Accept == HoldHeader)
                     await gate.WaitForReleaseAsync(context.RequestAborted);
                 else if (delayMilliseconds > 0)
@@ -56,6 +68,42 @@ internal static class MockUpstream
 
         await app.StartAsync();
         return app;
+    }
+
+    private static bool IsStreamRequest(StringValues accept)
+    {
+        foreach (string? value in accept)
+        {
+            if (value is not null && value.Contains(StreamHeader, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Writes one SSE event per token-sized chunk with a scripted lag, flushing each one, so only
+    /// the client-side arrival timing can prove the gateway forwarded them as they were produced.
+    /// </summary>
+    private static async Task WriteStreamAsync(HttpResponse response, string id, CancellationToken cancellationToken)
+    {
+        response.StatusCode = StatusCodes.Status200OK;
+        response.ContentType = "text/event-stream";
+        response.Headers.CacheControl = "no-cache";
+        string content = new('s', 64);
+        for (int index = 0; index < StreamChunks; index++)
+        {
+            byte[] chunk = Encoding.UTF8.GetBytes(
+                $"data: {{\"id\":\"{id}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n");
+            await response.Body.WriteAsync(chunk, cancellationToken);
+            await response.Body.FlushAsync(cancellationToken);
+            await Task.Delay(StreamChunkDelayMilliseconds, cancellationToken);
+        }
+
+        await response.Body.WriteAsync(
+            "data: {\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"prompt_cache_hit_tokens\":0}}\n\ndata: [DONE]\n\n"u8.ToArray(),
+            cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
     }
 
     private static int ResponseSizeFor(string model) => model switch

@@ -150,6 +150,13 @@ try
         + string.Join(" | ", payloads.Metrics.Select(metric => $"{metric.Label} {metric.AllocatedBytesPerRequest:N0} B"))
         + $" | limit <= {MaxAllocatedBytesPerRequest:N0} B => {(payloadAllocationPass ? "PASS" : "MISS")} (enforced)");
 
+    Streaming.StreamingReport streaming = await Streaming.RunAsync(routerExecutable, temporaryDirectory);
+    Console.WriteLine(
+        $"  streaming:  incremental {(streaming.Passed ? "PASS" : "MISS")} (enforced) | first byte routed "
+        + $"{streaming.Routed.FirstByteMilliseconds:F1} ms of {streaming.Routed.TotalMilliseconds:F1} ms "
+        + $"(direct {streaming.Direct.FirstByteMilliseconds:F1} ms of {streaming.Direct.TotalMilliseconds:F1} ms), "
+        + $"longest gap routed {streaming.Routed.MaxGapMilliseconds:F1} ms, {streaming.Routed.Reads} reads");
+
     await RunAdminUiSmokeAsync(routerUrl, mockUrl);
     Console.WriteLine("  admin UI:   PASS (login, create/edit user, create key, authenticate, revoke, edit+save model list)");
     await RunConcurrencySmokeAsync(concurrencyClient, routerEndpoint, routerRequest, gate);
@@ -158,7 +165,7 @@ try
     ParallelSmokeReport parallel = await ParallelSmoke.RunAsync(routerExecutable, temporaryDirectory);
     Console.WriteLine($"  parallel:   {parallel.Detail} in {parallel.ElapsedMilliseconds / 1_000d:F1} s");
 
-    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass || !payloadAllocationPass)
+    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass || !payloadAllocationPass || !streaming.Passed)
         return 1;
 
     if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))
