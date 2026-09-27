@@ -83,3 +83,5 @@ If you prefer to deploy the published image with no build, create the app with t
 Run the complete unit, Native AOT, integration, and performance suite with `./scripts/tests.sh`, and the container image checks with `./scripts/container/image-tests.sh`. Performance badges show the latest successful `main` run on GitHub-hosted Linux; enable GitHub Pages with **GitHub Actions** as its source to publish them.
 
 See [spec.md](spec.md) for detailed specifications, contracts, and architecture.
+
+License: [Apache 2.0](LICENSE).
