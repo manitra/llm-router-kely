@@ -9,6 +9,7 @@ internal sealed class ModelRewritingContent : HttpContent
     private readonly Stream _source;
     private byte[]? _prefix;
     private readonly int _prefixLength;
+    private readonly long _sourceLength;
     private readonly ModelRewrite _rewrite;
     private readonly int _maxBodyBytes;
 
@@ -16,12 +17,14 @@ internal sealed class ModelRewritingContent : HttpContent
         Stream source,
         byte[] prefix,
         int prefixLength,
+        long sourceLength,
         ModelRewrite rewrite,
         int maxBodyBytes)
     {
         _source = source;
         _prefix = prefix;
         _prefixLength = prefixLength;
+        _sourceLength = sourceLength;
         _rewrite = rewrite;
         _maxBodyBytes = maxBodyBytes;
     }
@@ -85,8 +88,17 @@ internal sealed class ModelRewritingContent : HttpContent
 
     protected override bool TryComputeLength(out long length)
     {
-        length = 0;
-        return false;
+        // A client-supplied length lets the upstream request carry Content-Length instead of
+        // chunked framing, which avoids the chunked write path and keeps the request readable by
+        // upstreams that reject chunked bodies. A chunked client request stays chunked.
+        if (_sourceLength < _prefixLength)
+        {
+            length = 0;
+            return false;
+        }
+
+        length = _sourceLength + _rewrite.Route.ReplacementJsonUtf8.Length - _rewrite.ValueLength;
+        return true;
     }
 
     protected override void Dispose(bool disposing)

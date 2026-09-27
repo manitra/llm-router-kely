@@ -143,7 +143,7 @@ An inference handler may depend only on preconstructed singleton services and im
 1. Parse and validate configuration. Create the configuration file from the built-in default when it is absent. Resolve every `${NAME}` reference, reporting all unresolved ones in a single error. Refuse startup on missing secrets, duplicate aliases, invalid prices, or a non-HTTPS upstream unless explicitly in development mode.
 2. Load and validate the configured identity provider. By default, read the identity file and hash the environment-supplied administrator key directly into the snapshot.
 3. Initialize empty current-day and historical in-memory aggregates. A restart intentionally starts usage at zero for the default statistics provider.
-4. Create the singleton `SocketsHttpHandler` and `HttpClient`.
+4. Create the singleton `SocketsHttpHandler` and `HttpMessageInvoker`.
 5. Verify that the configured upstream base URI is syntactically valid. A network call is not required for liveness.
 6. Start the UTC rollover/retention tick and, when enabled, the identity-file watcher.
 7. Mark readiness true and begin accepting traffic.
@@ -328,7 +328,7 @@ Implement a purpose-built UTF-8 JSON tokenizer/state machine over `PipeReader` s
 7. Copy all remaining request segments directly from client to upstream with a running 32-MiB limit.
 8. Return pooled buffers in `finally`; cancellation must propagate in both directions.
 
-The transformed request normally uses HTTP chunked transfer or HTTP/2 framing because content length can change. Do not recalculate or buffer to preserve `Content-Length`.
+The transformed request declares the exact rewritten `Content-Length` when the client supplied one: the alias always sits inside the retained prefix, so the length is the client length plus the alias-to-upstream-model byte delta and needs no buffering. A client request without `Content-Length` stays chunked. Never buffer or re-read the body to compute a length, and never forward the client's original `Content-Length`.
 
 Escaped property names equivalent to `model` MAY be rejected as `invalid_request` in MVP. The model value MUST accept valid JSON escapes but resolves to an alias of at most 64 UTF-8 bytes. Configuration restricts alias and upstream model IDs to ASCII `[A-Za-z0-9._:-]+`, so replacement output needs no escaping in normal use.
 
@@ -344,8 +344,9 @@ If DeepSeek does not support `/responses` in the target environment, the endpoin
 
 ### 8.1 Forwarding
 
-- Use one process-lifetime `SocketsHttpHandler` and `HttpClient`.
-- Send with `HttpCompletionOption.ResponseHeadersRead`.
+- Use one process-lifetime `SocketsHttpHandler` and `HttpMessageInvoker` (`HttpClient` adds per-request pending-request cancellation and timeout bookkeeping that this proxy never uses: no per-client timeout, no default headers, no buffering).
+- Send without buffering the response: `HttpMessageInvoker.SendAsync` returns as soon as upstream headers arrive, which is the `ResponseHeadersRead` behaviour the proxy needs.
+- Do not create or propagate W3C trace context on the upstream call (`SocketsHttpHandler.ActivityHeadersPropagator = null`). The per-request `Activity`, its tags and the formatted `traceparent` header are the largest single allocation in the proxy leg (about 1.1 KiB of the ~5 KiB per routed request), and no exporter consumes that context in the default deployment. Restoring upstream trace propagation requires a measured budget decision.
 - Disable automatic decompression, cookies, redirects, and proxy auto-discovery unless an explicit outbound proxy is configured.
 - Configure pooled connection lifetime (default 15 minutes), idle timeout (default 2 minutes), and sufficient per-server connections (default 256).
 - Negotiate HTTP/2 or HTTP/1.1; do not force one until the real DeepSeek endpoint benchmark selects a winner.
@@ -354,7 +355,7 @@ If DeepSeek does not support `/responses` in the target environment, the endpoin
 - If the client disconnects, cancel upstream immediately.
 - Do not coalesce, parse/re-serialize, gzip, cache, or retry response content.
 
-Preserve end-to-end upstream headers such as `Content-Type` and request IDs. Strip hop-by-hop headers and headers whose values become invalid after proxying. Do not expose upstream authorization or internal host data.
+Preserve end-to-end upstream headers such as `Content-Type` and request IDs. Strip hop-by-hop headers and headers whose values become invalid after proxying. Do not expose upstream authorization or internal host data. Append each upstream header value to the client response individually, so multi-value headers keep every value in order without allocating a string array per header per response.
 
 ### 8.2 SSE
 

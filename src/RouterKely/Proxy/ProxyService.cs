@@ -13,8 +13,10 @@ namespace RouterKely.Proxy;
 
 public sealed class ProxyService
 {
+    private static readonly ProductInfoHeaderValue UpstreamUserAgent = new("router-kely", "0.1");
+
     private readonly ApiKeyAuthenticator _authenticator;
-    private readonly HttpClient _client;
+    private readonly HttpMessageInvoker _client;
     private readonly RouterRuntime _runtime;
     private readonly UsageAccumulator _usage;
     private readonly ConcurrencyLimiter _concurrency;
@@ -22,7 +24,7 @@ public sealed class ProxyService
 
     public ProxyService(
         ApiKeyAuthenticator authenticator,
-        HttpClient client,
+        HttpMessageInvoker client,
         RouterRuntime runtime,
         UsageAccumulator usage,
         int maxConcurrentRequests,
@@ -149,23 +151,30 @@ public sealed class ProxyService
         long started = Stopwatch.GetTimestamp();
 
         using (content)
-        using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(settings.UpstreamBaseUri, "chat/completions")))
+        using (var request = new HttpRequestMessage(HttpMethod.Post, settings.ChatCompletionsUri))
         {
             request.Version = HttpVersion.Version20;
             request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.UpstreamApiKey);
-            request.Headers.UserAgent.ParseAdd("router-kely/0.1");
+            request.Headers.Authorization = settings.UpstreamAuthorization;
+            request.Headers.UserAgent.Add(UpstreamUserAgent);
             request.Content = content;
-            content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+            // The client's media type is forwarded verbatim; parsing it would allocate a value
+            // object only to be rendered back to a string.
+            content.Headers.TryAddWithoutValidation("Content-Type", contentType);
 
             if (context.Request.Headers.TryGetValue("Accept", out var accept))
-                request.Headers.TryAddWithoutValidation("Accept", accept.ToArray());
+            {
+                foreach (string? value in accept)
+                {
+                    if (value is not null)
+                        request.Headers.TryAddWithoutValidation("Accept", value);
+                }
+            }
 
             try
             {
                 using HttpResponseMessage upstream = await _client.SendAsync(
                     request,
-                    HttpCompletionOption.ResponseHeadersRead,
                     context.RequestAborted);
 
                 context.Response.StatusCode = (int)upstream.StatusCode;
@@ -256,6 +265,7 @@ public sealed class ProxyService
                             context.Request.Body,
                             prefix,
                             length,
+                            context.Request.ContentLength ?? -1,
                             rewrite,
                             settings.MaxRequestBodyBytes);
                     case ModelScanStatus.UnknownModel:
@@ -283,19 +293,23 @@ public sealed class ProxyService
 
     private static void CopyResponseHeaders(HttpResponseMessage upstream, HttpResponse response)
     {
-        foreach (KeyValuePair<string, IEnumerable<string>> header in upstream.Headers)
-        {
-            if (!IsHopByHop(header.Key))
-                response.Headers[header.Key] = header.Value.ToArray();
-        }
-
-        foreach (KeyValuePair<string, IEnumerable<string>> header in upstream.Content.Headers)
-        {
-            if (!IsHopByHop(header.Key))
-                response.Headers[header.Key] = header.Value.ToArray();
-        }
-
+        CopyHeaders(upstream.Headers, response);
+        CopyHeaders(upstream.Content.Headers, response);
         response.Headers.Remove("transfer-encoding");
+    }
+
+    // Appending each value keeps the multi-value shape of the original header without the string
+    // array ToArray() would allocate for every header of every response.
+    private static void CopyHeaders(HttpHeaders source, HttpResponse response)
+    {
+        foreach (KeyValuePair<string, IEnumerable<string>> header in source)
+        {
+            if (IsHopByHop(header.Key))
+                continue;
+
+            foreach (string value in header.Value)
+                response.Headers.Append(header.Key, value);
+        }
     }
 
     // An error body is small JSON, and it is the only place the upstream reason exists: capture

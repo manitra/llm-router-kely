@@ -83,6 +83,59 @@ public sealed class ProxyServiceTests : IDisposable
         Assert.EndsWith("…", described);
     }
 
+    [Fact]
+    public async Task RewrittenRequestCarriesTheExactContentLengthOfTheRewrittenBody()
+    {
+        var capture = new CapturingHandler();
+        (ProxyService proxy, _) = Compose(capture);
+        DefaultHttpContext context = CreateRequest();
+
+        await proxy.ProxyChatCompletionsAsync(context);
+
+        HttpRequestMessage sent = Assert.IsType<HttpRequestMessage>(capture.Request);
+        Assert.Equal(new Uri("https://upstream.example/v1/chat/completions"), sent.RequestUri);
+        Assert.Equal("Bearer sk-rk-upstream-1", sent.Headers.Authorization?.ToString());
+        Assert.Equal("router-kely/0.1", sent.Headers.UserAgent.ToString());
+        Assert.Equal("application/json", sent.Content?.Headers.ContentType?.MediaType);
+
+        Assert.Contains("\"model\":\"deepseek-chat\"", capture.Body);
+        // The declared length must match what is actually serialized, or the upstream request is
+        // truncated on the wire.
+        Assert.Equal(Encoding.UTF8.GetByteCount(capture.Body!), capture.DeclaredLength);
+    }
+
+    [Fact]
+    public async Task ChunkedClientRequestIsForwardedWithoutAContentLength()
+    {
+        var capture = new CapturingHandler();
+        (ProxyService proxy, _) = Compose(capture);
+        DefaultHttpContext context = CreateRequest();
+        context.Request.ContentLength = null;
+
+        await proxy.ProxyChatCompletionsAsync(context);
+
+        Assert.Null(capture.DeclaredLength);
+    }
+
+    [Fact]
+    public async Task ResponseHeadersKeepEveryValueAndDropHopByHopOnes()
+    {
+        var upstream = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        upstream.Headers.TryAddWithoutValidation("Warning", ["one", "two"]);
+        upstream.Headers.TryAddWithoutValidation("Keep-Alive", "timeout=5");
+        (ProxyService proxy, _) = Compose(new StubHandler(upstream));
+        DefaultHttpContext context = CreateRequest();
+
+        await proxy.ProxyChatCompletionsAsync(context);
+
+        Assert.Equal("one,two", context.Response.Headers["Warning"].ToString());
+        Assert.Equal("application/json", context.Response.Headers.ContentType.ToString()!.Split(';')[0]);
+        Assert.False(context.Response.Headers.ContainsKey("Keep-Alive"));
+    }
+
     private (ProxyService Proxy, RecordingLogger Logger) Compose(HttpMessageHandler handler)
     {
         File.WriteAllText(_path, Config);
@@ -181,6 +234,30 @@ public sealed class ProxyServiceTests : IDisposable
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => Task.FromResult(response);
+    }
+
+    private sealed class CapturingHandler : HttpMessageHandler
+    {
+        public HttpRequestMessage? Request { get; private set; }
+
+        public string? Body { get; private set; }
+
+        public long? DeclaredLength { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Request = request;
+            DeclaredLength = request.Content?.Headers.ContentLength;
+            Body = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+            };
+        }
     }
 
     private sealed class ThrowingHandler : HttpMessageHandler

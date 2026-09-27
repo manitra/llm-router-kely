@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using RouterKely.Configuration;
 using RouterKely.Core.Authentication;
 using RouterKely.Core.Identity;
@@ -16,7 +17,14 @@ public sealed record RouterSnapshot(
     Uri UpstreamBaseUri,
     string UpstreamApiKey,
     int MaxRequestBodyBytes,
-    int MaxModelPrefixBytes);
+    int MaxModelPrefixBytes)
+{
+    /// <summary>Cached because a URI combination would allocate on every request.</summary>
+    public Uri ChatCompletionsUri { get; } = new(UpstreamBaseUri, "chat/completions");
+
+    /// <summary>Immutable and shared across requests; assigning it allocates nothing.</summary>
+    public AuthenticationHeaderValue UpstreamAuthorization { get; } = new("Bearer", UpstreamApiKey);
+}
 
 /// <summary>
 /// Holds the running configuration and re-applies it when an administrator saves a new one.

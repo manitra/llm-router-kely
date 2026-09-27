@@ -40,16 +40,14 @@ var handler = new SocketsHttpHandler
     AllowAutoRedirect = false,
     AutomaticDecompression = DecompressionMethods.None,
     UseCookies = false,
+    ActivityHeadersPropagator = null,
     PooledConnectionLifetime = TimeSpan.FromMinutes(15),
     PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
     MaxConnectionsPerServer = configuration.EffectiveMaxConcurrentRequests,
     ConnectTimeout = TimeSpan.FromSeconds(5)
 };
 
-var client = new HttpClient(handler)
-{
-    Timeout = Timeout.InfiniteTimeSpan
-};
+var client = new HttpMessageInvoker(handler);
 
 var identityProvider = new FileIdentityProvider(
     configuration.Identity.FilePath,
