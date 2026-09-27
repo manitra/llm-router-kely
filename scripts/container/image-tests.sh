@@ -160,6 +160,15 @@ DOCKERFILE
 # must declare both secret names plus the overridable variables for Coolify's env form,
 # and the /data volume. A ${VAR:?} guard here would abort the deploy at interpolation
 # time, before Coolify injects its stored variables, so that is rejected too.
+#
+# Every compose invocation below goes through this wrapper, because that is what Coolify
+# does and because compose resolves relative paths in the file against the *project
+# directory* rather than against the file's own directory. Resolving the file the other way
+# would accept a context that escapes the repository and then fail the real deploy.
+compose_config() {
+  docker compose --project-directory "$repo_root" "$@"
+}
+
 assert_coolify_compose() {
   echo "==> Asserting the Coolify compose file builds from the repository root"
   if ! docker compose version >/dev/null 2>&1; then
@@ -168,7 +177,7 @@ assert_coolify_compose() {
   fi
   local file="$container_dir/coolify.compose.yml"
   local resolved
-  if ! resolved="$(docker compose --file "$file" config 2>"$work_dir/coolify.stderr")"; then
+  if ! resolved="$(compose_config --file "$file" config 2>"$work_dir/coolify.stderr")"; then
     cat "$work_dir/coolify.stderr" >&2
     fail "the Coolify compose file is not valid"
   fi
@@ -199,7 +208,7 @@ assert_coolify_compose() {
       ROUTERKELY_CONFIG=/data/override.json \
       ROUTERKELY_HEALTH_URL=http://127.0.0.1:9999/health/ready \
       ASPNETCORE_FORWARDEDHEADERS_ENABLED=false \
-      docker compose --file "$file" config 2>>"$work_dir/coolify.stderr")"; then
+      compose_config --file "$file" config 2>>"$work_dir/coolify.stderr")"; then
     cat "$work_dir/coolify.stderr" >&2
     fail "the Coolify compose file does not resolve with overridden variables"
   fi

@@ -24,7 +24,13 @@
 services:
   router-kely:
     build:
-      context: ../..
+      # "." rather than "../.." on purpose: Coolify runs compose with
+      # --project-directory set to the repository root, and compose resolves relative
+      # paths in this file against the project directory, not against this file's
+      # directory. With the project directory at the root, "../.." would escape the
+      # repository and the Dockerfile path would resolve to /scripts/... . Run this
+      # file with --project-directory pointing at the repository root, as Coolify does.
+      context: .
       dockerfile: scripts/container/Dockerfile
     image: router-kely:coolify
     restart: unless-stopped
