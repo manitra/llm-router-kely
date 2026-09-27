@@ -28,8 +28,24 @@ public struct UsageStreamObserver
 
     public void Append(ReadOnlySpan<byte> bytes)
     {
-        foreach (byte value in bytes)
-            ReadByte(value);
+        int index = 0;
+        while (index < bytes.Length)
+        {
+            // The bulk of a completion body is a string value that is not a property we track
+            // (the assistant content), so skip it in one search instead of stepping through every
+            // byte. Without this, the scan cost grows with the payload.
+            if (_inString && !_captureProperty && !_escaped)
+            {
+                int stop = bytes[index..].IndexOfAny((byte)'"', (byte)'\\');
+                if (stop < 0)
+                    return;
+
+                index += stop;
+            }
+
+            ReadByte(bytes[index]);
+            index++;
+        }
     }
 
     public UsageObservation Read()

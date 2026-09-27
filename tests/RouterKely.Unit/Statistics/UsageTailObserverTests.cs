@@ -1,3 +1,4 @@
+using System.Text;
 using RouterKely.Core.Statistics;
 using Xunit;
 
@@ -47,5 +48,27 @@ public sealed class UsageStreamObserverTests
             Assert.Equal(2, usage.CachedInputTokens);
             Assert.Equal(3, usage.OutputTokens);
         }
+    }
+
+    [Fact]
+    public void ReadSkipsLongContentStringsAndStillFindsUsage()
+    {
+        // The content string is long enough to span several read chunks with no quote or backslash
+        // in them, which is exactly what the scan jumps over instead of walking byte by byte.
+        byte[] payload = Encoding.UTF8.GetBytes(
+            "data: {\"choices\":[{\"delta\":{\"content\":\""
+            + new string('a', 40_000)
+            + "\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":9,\"prompt_cache_hit_tokens\":3}}\n\n");
+
+        var observer = new UsageStreamObserver();
+        for (int offset = 0; offset < payload.Length; offset += 4_096)
+            observer.Append(payload.AsSpan(offset, Math.Min(4_096, payload.Length - offset)));
+
+        UsageObservation usage = observer.Read();
+
+        Assert.True(usage.Found);
+        Assert.Equal(7, usage.InputTokens);
+        Assert.Equal(3, usage.CachedInputTokens);
+        Assert.Equal(9, usage.OutputTokens);
     }
 }
