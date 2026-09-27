@@ -77,7 +77,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Cache/broker | None. No Redis, message broker, or worker service. |
 | Process model | One process per container. The certified MVP deployment is one replica. |
 | Runtime | .NET 10 LTS Native AOT with workstation GC. |
-| Telemetry | Prometheus text metrics, structured warnings/errors, no request or response bodies. |
+| Telemetry | Prometheus text metrics, structured warnings/errors, no request bodies, headers, or successful response bodies. |
 
 ## 3. Scope
 
@@ -1081,9 +1081,10 @@ Never label metrics by user ID, key ID, email, request ID, raw path, IP address,
 
 - Default production level is `Information` for lifecycle/config version/accounting summary and `Warning` for degraded behavior.
 - Successful inference requests do not emit one log event each. Metrics and aggregates cover them.
-- Errors are rate-limited/grouped by stable reason.
+- Every failed upstream exchange emits exactly one `Warning` carrying the upstream status, the model alias, the upstream host and the upstream error body as a bounded (512 character) single-line snippet. Failures group under that stable message template, and their rate is bounded by the concurrency limit.
+- An aborted client request emits one `Information` with the model alias and the elapsed milliseconds, so a client-side timeout is distinguishable from an upstream failure.
 - Exceptions are not used for expected authentication, quota, limit, cancellation, or 4xx control flow.
-- A temporary diagnostic mode may sample metadata for at most 15 minutes, never bodies or secrets, and auto-disables.
+- Request bodies, request headers, secrets and successful response bodies are never logged; the bounded upstream-error snippet above is the only response content that reaches the log. A temporary diagnostic mode may sample metadata for at most 15 minutes, never bodies or secrets, and auto-disables.
 
 ### 17.4 Shutdown
 

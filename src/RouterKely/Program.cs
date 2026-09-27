@@ -77,12 +77,6 @@ var runtime = new RouterRuntime(
     authenticator,
     usage,
     configuration);
-var proxy = new ProxyService(
-    authenticator,
-    client,
-    runtime,
-    usage,
-    configuration.EffectiveMaxConcurrentRequests);
 var compatibility = new CompatibilityService(
     authenticator,
     runtime,
@@ -95,6 +89,14 @@ builder.Services.AddSingleton<IHostedService>(_ => new StatisticsPump(
     TimeSpan.FromMilliseconds(configuration.Statistics.FlushIntervalMilliseconds)));
 
 WebApplication app = builder.Build();
+// The logger comes from the host, so upstream failures land in the platform's log view.
+var proxy = new ProxyService(
+    authenticator,
+    client,
+    runtime,
+    usage,
+    configuration.EffectiveMaxConcurrentRequests,
+    app.Logger);
 var identityAdmin = new IdentityAdminService(
     identityProvider,
     fileIdentities,

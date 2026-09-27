@@ -18,19 +18,22 @@ public sealed class ProxyService
     private readonly RouterRuntime _runtime;
     private readonly UsageAccumulator _usage;
     private readonly ConcurrencyLimiter _concurrency;
+    private readonly ILogger _logger;
 
     public ProxyService(
         ApiKeyAuthenticator authenticator,
         HttpClient client,
         RouterRuntime runtime,
         UsageAccumulator usage,
-        int maxConcurrentRequests)
+        int maxConcurrentRequests,
+        ILogger logger)
     {
         _authenticator = authenticator;
         _client = client;
         _runtime = runtime;
         _usage = usage;
         _concurrency = new ConcurrencyLimiter(maxConcurrentRequests);
+        _logger = logger;
     }
 
     private bool TryAuthenticate(
@@ -167,11 +170,15 @@ public sealed class ProxyService
 
                 context.Response.StatusCode = (int)upstream.StatusCode;
                 CopyResponseHeaders(upstream, context.Response);
-                UsageObservation observed = await CopyResponseAsync(
-                    upstream.Content,
-                    context.Response,
-                    context.RequestAborted);
                 bool success = upstream.IsSuccessStatusCode;
+                UsageObservation observed = success
+                    ? await CopyResponseAsync(upstream.Content, context.Response, context.RequestAborted)
+                    : await CopyUpstreamErrorAsync(
+                        upstream,
+                        context.Response,
+                        route.Alias,
+                        settings.UpstreamBaseUri.Host,
+                        context.RequestAborted);
                 UsageObservation accounted = success
                     ? observed
                     : new UsageObservation(0, 0, 0, true);
@@ -199,11 +206,23 @@ public sealed class ProxyService
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
-                account.Record(route, UsageOutcome.Cancelled, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
+                long elapsed = ElapsedMilliseconds(started);
+                account.Record(route, UsageOutcome.Cancelled, new UsageObservation(0, 0, 0, true), 0, elapsed);
+                // A client timeout leaves no trace in the upstream response, so it must be
+                // distinguishable from an upstream failure in the log.
+                _logger.LogInformation(
+                    "Client aborted {Model} after {ElapsedMilliseconds} ms.",
+                    route.Alias,
+                    elapsed);
             }
-            catch (HttpRequestException) when (!context.Response.HasStarted)
+            catch (HttpRequestException exception) when (!context.Response.HasStarted)
             {
                 account.Record(route, UsageOutcome.UpstreamError, new UsageObservation(0, 0, 0, true), 0, ElapsedMilliseconds(started));
+                _logger.LogWarning(
+                    exception,
+                    "Upstream unreachable for {Model} on {Host}.",
+                    route.Alias,
+                    settings.UpstreamBaseUri.Host);
                 await WriteErrorAsync(context, 502, "upstream_error", "Unable to reach the upstream API.");
             }
         }
@@ -277,6 +296,57 @@ public sealed class ProxyService
         }
 
         response.Headers.Remove("transfer-encoding");
+    }
+
+    // An error body is small JSON, and it is the only place the upstream reason exists: capture
+    // its first bytes for the log line, then forward every byte untouched (the remainder streams
+    // unbuffered when a body is unexpectedly large).
+    private async Task<UsageObservation> CopyUpstreamErrorAsync(
+        HttpResponseMessage upstream,
+        HttpResponse response,
+        string modelAlias,
+        string upstreamHost,
+        CancellationToken cancellationToken)
+    {
+        await using Stream source = await upstream.Content.ReadAsStreamAsync(cancellationToken);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(UpstreamErrorLog.CapturedBytes);
+        try
+        {
+            int captured = 0;
+            while (captured < UpstreamErrorLog.CapturedBytes)
+            {
+                int read = await source.ReadAsync(buffer.AsMemory(captured), cancellationToken);
+                if (read == 0)
+                    break;
+
+                captured += read;
+            }
+
+            _logger.LogWarning(
+                "Upstream {Status} for {Model} on {Host}: {UpstreamError}",
+                (int)upstream.StatusCode,
+                modelAlias,
+                upstreamHost,
+                UpstreamErrorLog.Describe(buffer.AsSpan(0, captured)));
+
+            if (captured > 0)
+                await response.BodyWriter.WriteAsync(buffer.AsMemory(0, captured), cancellationToken);
+
+            while (true)
+            {
+                int read = await source.ReadAsync(buffer, cancellationToken);
+                if (read == 0)
+                    break;
+
+                await response.BodyWriter.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        return new UsageObservation(0, 0, 0, true);
     }
 
     private static async Task<UsageObservation> CopyResponseAsync(
