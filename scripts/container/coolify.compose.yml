@@ -4,13 +4,21 @@
 # The build context is the repository root because the Dockerfile reads the
 # application sources. Building here instead of pulling the published image lets
 # Coolify deploy any branch or commit, not only what CI has already published to GHCR.
-# The operator only pastes the two secrets into Coolify's environment variable form
-# and adds a persistent volume mounted at /data. Nothing here requires a shell.
+# The operator pastes the two secrets into Coolify's environment variable form and adds a
+# persistent volume mounted at /data. Nothing here requires a shell.
+#
+# Every variable listed below appears as an editable row in Coolify's environment form.
+# All five are declared the same way — as `${VAR:-}` overrides with an empty default — so
+# Coolify can set any of them from the UI while a row left empty changes nothing: the
+# value is substituted to empty, compose keeps it, and the container falls back to the
+# image's own default. The two secrets have no image default on purpose, so an empty row
+# makes startup fail with the exhaustive missing-variable report rather than run with a
+# guessable credential.
 #
 # Two rules this file has to follow, both specific to Coolify:
-#   - the environment values are bare names instead of ${VAR:?}. Coolify injects its
-#     stored variables into the container at runtime, after compose interpolation, so
-#     a hard guard would abort the deploy before a container ever starts;
+#   - the values are overrides, never ${VAR:?}. Coolify interpolates this file before
+#     injecting its stored variables, so a hard guard would abort the deploy before a
+#     container ever starts;
 #   - no fixed host port. Coolify's proxy assigns one and routes TLS to the container,
 #     which is what keeps X-Forwarded-Proto and the same-origin check working.
 services:
@@ -21,9 +29,17 @@ services:
     image: router-kely:coolify
     restart: unless-stopped
     environment:
-      # Listed so Coolify pre-creates both rows in its env form; fill in the values.
-      ROUTERKELY_ADMIN_API_KEY:
-      ROUTERKELY_DEEPSEEK_API_KEY:
+      # Required secrets, overridable from Coolify's UI. The empty default is deliberate:
+      # an empty key would either fail startup or become a guessable credential, so
+      # nothing is invented here and startup reports both names when the rows are unset.
+      ROUTERKELY_ADMIN_API_KEY: ${ROUTERKELY_ADMIN_API_KEY:-}
+      ROUTERKELY_DEEPSEEK_API_KEY: ${ROUTERKELY_DEEPSEEK_API_KEY:-}
+      # Optional overrides, overridable the same way. The defaults in the compose file
+      # equal the image ENV block, so the container behaves identically whether the row
+      # is empty or the image default is used.
+      ROUTERKELY_CONFIG: ${ROUTERKELY_CONFIG:-/data/router-kely.local.json}
+      ROUTERKELY_HEALTH_URL: ${ROUTERKELY_HEALTH_URL:-http://127.0.0.1:8080/health/ready}
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: ${ASPNETCORE_FORWARDEDHEADERS_ENABLED:-true}
     volumes:
       # The named volume inherits the image's /data ownership, so the unprivileged
       # container (uid 1654) can write it with no host preparation.

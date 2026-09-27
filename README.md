@@ -74,7 +74,7 @@ On the first start the router creates `/data/router-kely.local.json` from its em
 
 Coolify builds the image from the branch you select and deploys it, so any branch or commit can be deployed without waiting for a published image. Set **Base Directory** `/` and **Compose Location** `/scripts/container/coolify.compose.yml`.
 
-Coolify's environment form already lists both secret names — fill in the values — and the Compose file declares the persistent `/data` volume, so there is nothing to add by hand. Coolify's proxy terminates TLS and assigns the host port, which is why the listener stays on plain HTTP port 8080.
+Coolify's environment form lets you edit every variable the deployment accepts: `ROUTERKELY_ADMIN_API_KEY`, `ROUTERKELY_DEEPSEEK_API_KEY`, `ROUTERKELY_CONFIG`, `ROUTERKELY_HEALTH_URL`, and `ASPNETCORE_FORWARDEDHEADERS_ENABLED`. Each row is declared as an override with a default, so you can set any of them from the UI and a row you leave empty uses the default — the image default for the last three, and no value at all for the two secrets, which makes startup fail with the list of missing variables. The Compose file declares the persistent `/data` volume, so there is nothing to add by hand. Coolify's proxy terminates TLS and assigns the host port, which is why the listener stays on plain HTTP port 8080.
 
 If you prefer to deploy the published image with no build, create the app with the **Docker Image** build pack using `ghcr.io/manitra/llm-router-kely:latest`, then add both variables, a persistent volume mounted at `/data`, and port `8080` manually.
 

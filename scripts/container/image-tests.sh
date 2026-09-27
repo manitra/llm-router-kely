@@ -157,9 +157,9 @@ DOCKERFILE
 
 # Coolify is the only Compose consumer, and it builds the Dockerfile from the repository
 # root so any branch can be deployed. The file must not hard-code a GHCR image, and it
-# must declare both variable names for Coolify's env form and the /data volume. A
-# ${VAR:?} guard here would abort the deploy at interpolation time, before Coolify
-# injects its stored variables, so that is rejected too.
+# must declare both secret names plus the overridable variables for Coolify's env form,
+# and the /data volume. A ${VAR:?} guard here would abort the deploy at interpolation
+# time, before Coolify injects its stored variables, so that is rejected too.
 assert_coolify_compose() {
   echo "==> Asserting the Coolify compose file builds from the repository root"
   if ! docker compose version >/dev/null 2>&1; then
@@ -188,6 +188,44 @@ assert_coolify_compose() {
   # otherwise match the explanation rather than a real interpolation.
   grep -v '^[[:space:]]*#' "$file" | grep -q ':?' &&
     fail "the Coolify compose file uses a \${VAR:?} guard that breaks Coolify interpolation"
+  # Every variable is the operator's UI surface and must be overridable with a working
+  # default. Setting all five here resolves the file the way Coolify would after the
+  # operator fills the form in, and the defaults are checked with nothing set above, so a
+  # bare name (which Coolify materializes as an empty value, displacing the image ENV)
+  # or a value that ignores the environment both fail this check.
+  local overridden
+  if ! overridden="$(ROUTERKELY_ADMIN_API_KEY=sk-rk_coolify \
+      ROUTERKELY_DEEPSEEK_API_KEY=sk-upstream_coolify \
+      ROUTERKELY_CONFIG=/data/override.json \
+      ROUTERKELY_HEALTH_URL=http://127.0.0.1:9999/health/ready \
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED=false \
+      docker compose --file "$file" config 2>>"$work_dir/coolify.stderr")"; then
+    cat "$work_dir/coolify.stderr" >&2
+    fail "the Coolify compose file does not resolve with overridden variables"
+  fi
+  grep -q "ROUTERKELY_ADMIN_API_KEY: sk-rk_coolify" <<< "$overridden" ||
+    fail "ROUTERKELY_ADMIN_API_KEY in the Coolify compose file cannot be overridden"
+  grep -q "ROUTERKELY_DEEPSEEK_API_KEY: sk-upstream_coolify" <<< "$overridden" ||
+    fail "ROUTERKELY_DEEPSEEK_API_KEY in the Coolify compose file cannot be overridden"
+  grep -q "ROUTERKELY_CONFIG: /data/override.json" <<< "$overridden" ||
+    fail "ROUTERKELY_CONFIG in the Coolify compose file cannot be overridden"
+  grep -q "ROUTERKELY_HEALTH_URL: http://127.0.0.1:9999/health/ready" <<< "$overridden" ||
+    fail "ROUTERKELY_HEALTH_URL in the Coolify compose file cannot be overridden"
+  grep -q 'ASPNETCORE_FORWARDEDHEADERS_ENABLED: "false"' <<< "$overridden" ||
+    fail "ASPNETCORE_FORWARDEDHEADERS_ENABLED in the Coolify compose file cannot be overridden"
+  # Unset, the secrets must be empty and carry no real value: an invented default would
+  # start the router with a credential the operator never chose. Resolved output renders
+  # an empty value as `KEY: ""`, so both a bare name and an empty override pass here.
+  grep -qE '^      ROUTERKELY_ADMIN_API_KEY: ""?$' <<< "$resolved" ||
+    fail "the Coolify compose file does not declare ROUTERKELY_ADMIN_API_KEY as an empty override"
+  grep -qE '^      ROUTERKELY_DEEPSEEK_API_KEY: ""?$' <<< "$resolved" ||
+    fail "the Coolify compose file does not declare ROUTERKELY_DEEPSEEK_API_KEY as an empty override"
+  grep -q "ROUTERKELY_CONFIG: /data/router-kely.local.json" <<< "$resolved" ||
+    fail "ROUTERKELY_CONFIG in the Coolify compose file has no image default"
+  grep -q "ROUTERKELY_HEALTH_URL: http://127.0.0.1:8080/health/ready" <<< "$resolved" ||
+    fail "ROUTERKELY_HEALTH_URL in the Coolify compose file has no image default"
+  grep -q 'ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"' <<< "$resolved" ||
+    fail "ASPNETCORE_FORWARDEDHEADERS_ENABLED in the Coolify compose file has no image default"
   return 0
 }
 

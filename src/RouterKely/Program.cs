@@ -11,8 +11,13 @@ using RouterKely.Proxy;
 using RouterKely.Statistics;
 using RouterKely.Ui;
 
-string configPath = Environment.GetEnvironmentVariable("ROUTERKELY_CONFIG")
-    ?? FindLocalConfiguration();
+// An empty value counts as unset: a platform that materializes every declared variable
+// (Coolify does) can hand over an empty string for a row the operator left alone, and an
+// empty path would otherwise resolve to the working directory instead of the volume.
+string? configuredPath = Environment.GetEnvironmentVariable("ROUTERKELY_CONFIG");
+string configPath = string.IsNullOrWhiteSpace(configuredPath)
+    ? FindLocalConfiguration()
+    : configuredPath;
 LocalConfiguration localConfiguration;
 try
 {
