@@ -20,7 +20,7 @@
 
 Tired of provisioning multi-gigabyte instances for your LiteLLM gateway? Welcome home.
 - 4.8 KiB allocated per routed request in our latest benchmark
-- 150 µs p50 incremental proxy overhead against a same-host mock upstream
+- 80 µs p50 incremental proxy overhead against a same-host mock upstream
 - 29.8 MiB idle working set after load
 - Designed to handle 256 concurrent streams within a 250 MiB memory limit
 You can downsize your VPS.
