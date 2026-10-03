@@ -65,4 +65,28 @@ public sealed class UsageAccumulatorTests
         account.Record(route, UsageOutcome.Success, usage, 750, 10);
         Assert.True(account.Quota.IsExceeded);
     }
+
+    [Fact]
+    public void RestoredDailyCostSeedsQuotaForKnownUsersAndSurvivesAReload()
+    {
+        var route = new ModelRoute(0, "axian-fast", "deepseek-flash");
+        var identities = new IdentitySnapshot(
+            1,
+            [new IdentityUser(7, "User", "user@example.com", IdentityRole.User, true, 1_000)],
+            [new IdentityKey(42, 7, "Key", new string('0', 64), "sk-rk_test", "test", true)]);
+        var accumulator = new UsageAccumulator([route], identities);
+
+        // The unknown id must be ignored instead of creating a counter nobody owns.
+        accumulator.RestoreDailyCost(new Dictionary<long, long> { [7] = 400, [999] = 5_000 });
+
+        Assert.True(accumulator.TryGetAccount(42, out UsageAccount? account));
+        Assert.Equal(400, account!.Quota.CurrentUsageNanoUsd);
+
+        // A route-count change rebuilds the accounts but the per-user quota counter is reused.
+        accumulator.Update([route, new ModelRoute(1, "axian-pro", "deepseek-v4-pro")], identities);
+
+        Assert.True(accumulator.TryGetAccount(42, out UsageAccount? reloaded));
+        Assert.Same(account.Quota, reloaded!.Quota);
+        Assert.Equal(400, reloaded.Quota.CurrentUsageNanoUsd);
+    }
 }

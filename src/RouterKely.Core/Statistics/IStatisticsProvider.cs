@@ -12,4 +12,13 @@ public interface IStatisticsProvider
         long? userId,
         long? keyId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns the retained daily cells with their user and key intact, for the administration UI
+    /// and for durable stores that must not lose attribution. Cold path only.
+    /// </summary>
+    ValueTask<UsageRowsSnapshot> QueryUsageRowsAsync(
+        DateOnly startDate,
+        DateOnly endDate,
+        CancellationToken cancellationToken);
 }

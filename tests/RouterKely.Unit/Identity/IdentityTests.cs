@@ -45,9 +45,8 @@ public sealed class IdentityTests
     [Fact]
     public async Task FileProviderPersistsVersionedMutationsWithoutPlaintextKeys()
     {
-        string directory = Path.Combine(FindRepositoryRoot(), "scripts", $".tmp-identity-{Guid.NewGuid():N}");
+        string directory = TestPaths.CreateTempDirectory("identity");
         string path = Path.Combine(directory, "identities.json");
-        Directory.CreateDirectory(directory);
         try
         {
             var provider = new FileIdentityProvider(path, 10, 20, 1, 1);
@@ -93,18 +92,5 @@ public sealed class IdentityTests
             if (Directory.Exists(directory))
                 Directory.Delete(directory, recursive: true);
         }
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        for (DirectoryInfo? directory = new(Directory.GetCurrentDirectory());
-             directory is not null;
-             directory = directory.Parent)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "RouterKely.slnx")))
-                return directory.FullName;
-        }
-
-        throw new InvalidOperationException("Repository root not found.");
     }
 }

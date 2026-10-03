@@ -85,6 +85,59 @@ public sealed class InMemoryStatisticsProvider : IStatisticsProvider
         }
     }
 
+    public ValueTask<UsageRowsSnapshot> QueryUsageRowsAsync(
+        DateOnly startDate,
+        DateOnly endDate,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            UsageRow[] rows = _daily
+                .Where(pair => pair.Key.Date >= startDate && pair.Key.Date <= endDate)
+                .Select(pair => new UsageRow(
+                    pair.Key.Date,
+                    pair.Key.UserId,
+                    pair.Key.KeyId,
+                    pair.Key.ModelAlias,
+                    pair.Value.RequestCount,
+                    pair.Value.InputTokens,
+                    pair.Value.CachedInputTokens,
+                    pair.Value.OutputTokens,
+                    pair.Value.CostNanoUsd))
+                .OrderBy(row => row.Date)
+                .ThenBy(row => row.UserId)
+                .ThenBy(row => row.KeyId)
+                .ThenBy(row => row.ModelAlias, StringComparer.Ordinal)
+                .ToArray();
+            return ValueTask.FromResult(new UsageRowsSnapshot(rows));
+        }
+    }
+
+    /// <summary>
+    /// Installs restored daily cells directly, without creating hourly buckets: historical daily
+    /// data has no hour, so replaying it through <see cref="WriteAsync"/> would fabricate 00:00
+    /// hourly rows. Cold-path only, called before the pump and requests start.
+    /// </summary>
+    public void InstallDailyRows(UsageRowsSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (_gate)
+        {
+            foreach (UsageRow row in snapshot.Rows)
+            {
+                _daily[new DailyKey(row.Date, row.UserId, row.KeyId, row.ModelAlias)] = new MutableUsage
+                {
+                    RequestCount = row.RequestCount,
+                    InputTokens = row.InputTokens,
+                    CachedInputTokens = row.CachedInputTokens,
+                    OutputTokens = row.OutputTokens,
+                    CostNanoUsd = row.CostNanoUsd,
+                };
+            }
+        }
+    }
+
     private static void Merge<TKey>(
         Dictionary<TKey, MutableUsage> target,
         TKey key,

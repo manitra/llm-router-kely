@@ -87,6 +87,24 @@ public sealed class UsageAccumulator
         }
     }
 
+    /// <summary>
+    /// Seeds the current UTC day's consumed quota from restored usage, so a restart cannot hand a
+    /// user back the daily budget they already spent. Unknown users are ignored and no counter is
+    /// created for them. Cold path only, called before requests are served.
+    /// </summary>
+    public void RestoreDailyCost(IReadOnlyDictionary<long, long> costNanoUsdByUser)
+    {
+        ArgumentNullException.ThrowIfNull(costNanoUsdByUser);
+        lock (_gate)
+        {
+            foreach ((long userId, long costNanoUsd) in costNanoUsdByUser)
+            {
+                if (costNanoUsd > 0 && _quotas.TryGetValue(userId, out DailyQuotaCounter? quota))
+                    quota.Add(costNanoUsd);
+            }
+        }
+    }
+
     public UsageBatch ExchangePending(DateTimeOffset now)
     {
         // Read the accounts and the route list under one acquisition: accounts are only replaced
