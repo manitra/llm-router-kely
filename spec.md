@@ -62,7 +62,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Roles | `admin` and `user`. |
 | Upstreams | One DeepSeek base URL and API credential. |
 | Models | A configurable list of public aliases, between one and 64 rows. The shipped default defines two: `deepseek-fast` and `deepseek-pro`. |
-| Default mapping | `deepseek-fast` → `deepseek-chat`; `deepseek-pro` → `deepseek-reasoner`. Aliases, upstream IDs, prices, and token caps are all editable. |
+| Default mapping | `deepseek-fast` → `deepseek-flash`; `deepseek-pro` → `deepseek-v4-pro`. Aliases, upstream IDs, prices, and token caps are all editable. |
 | Inference protocols | OpenAI-compatible Chat Completions and Responses request forwarding. |
 | Response behavior | Preserve upstream status, body bytes, and streaming behavior; do not translate response bodies. |
 | Identity state | Default: one atomically replaced configuration file containing users, quotas, and key hashes, plus one environment-supplied administrator key. |
@@ -310,7 +310,7 @@ Example:
 
 ```text
 incoming:  {"model":"deepseek-fast","messages":[...],"vendor_extension":true}
-upstream:  {"model":"deepseek-chat","messages":[...],"vendor_extension":true}
+upstream:  {"model":"deepseek-flash","messages":[...],"vendor_extension":true}
 ```
 
 The transformation MUST NOT deserialize into DTOs, build a `JsonDocument`, convert the body to a string, use regex, or buffer the full body.
@@ -390,7 +390,7 @@ This is a conscious MVP limitation. If real DeepSeek streaming requires a reques
 
 ### 8.4 Upstream model in responses
 
-LLM Router Kely does not rewrite response bodies. Therefore an upstream response may report `deepseek-chat` or `deepseek-reasoner` instead of the public alias. This is an intentional compatibility deviation required for byte-for-byte streaming. Clients that require response-model aliasing are out of MVP scope until observed.
+LLM Router Kely does not rewrite response bodies. Therefore an upstream response may report `deepseek-flash` or `deepseek-v4-pro` instead of the public alias. This is an intentional compatibility deviation required for byte-for-byte streaming. Clients that require response-model aliasing are out of MVP scope until observed.
 
 ## 9. API keys and authorization
 
@@ -858,17 +858,17 @@ Example:
     "Models": [
       {
         "Alias": "deepseek-fast",
-        "UpstreamModel": "deepseek-chat",
-        "InputNanoUsdPerMillion": 0,
-        "CachedInputNanoUsdPerMillion": 0,
-        "OutputNanoUsdPerMillion": 0
+        "UpstreamModel": "deepseek-flash",
+        "InputNanoUsdPerMillion": 300000000,
+        "CachedInputNanoUsdPerMillion": 6000000,
+        "OutputNanoUsdPerMillion": 1200000000
       },
       {
         "Alias": "deepseek-pro",
-        "UpstreamModel": "deepseek-reasoner",
-        "InputNanoUsdPerMillion": 0,
-        "CachedInputNanoUsdPerMillion": 0,
-        "OutputNanoUsdPerMillion": 0
+        "UpstreamModel": "deepseek-v4-pro",
+        "InputNanoUsdPerMillion": 1320000000,
+        "CachedInputNanoUsdPerMillion": 44000000,
+        "OutputNanoUsdPerMillion": 3960000000
       }
     ],
     "MaxRequestBodyBytes": 33554432,
@@ -889,7 +889,7 @@ Example:
 }
 ```
 
-Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing.
+Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing. The shipped defaults use DeepSeek's peak rates (off-peak is billed at half the peak rate), which keeps the quota guardrail conservative, plus DeepSeek's published 1,048,576-token context and 393,216-token maximum output caps.
 
 #### First start and environment expansion
 

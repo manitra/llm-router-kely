@@ -96,13 +96,13 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     }
 
     [Fact]
-    public void ToFormConvertsNanoUsdBackToUsd()
+    public void ToFormKeepsModelPriceInNanoUsdPerMillion()
     {
         Seed();
         var service = new ConfigurationAdminService(_tempPath);
         ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
 
-        Assert.Equal("0", form.Models[0].InputUsdPerMillion);
+        Assert.Equal("300000000", form.Models[0].InputUsdPerMillion);
     }
 
     [Fact]

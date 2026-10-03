@@ -18,22 +18,22 @@
     "models": [
       {
         "alias": "deepseek-fast",
-        "upstreamModel": "deepseek-chat",
-        "inputNanoUsdPerMillion": 0,
-        "cachedInputNanoUsdPerMillion": 0,
-        "outputNanoUsdPerMillion": 0,
-        "maxInputTokens": 128000,
-        "maxOutputTokens": 8192,
-        "supportsReasoning": false
+        "upstreamModel": "deepseek-flash",
+        "inputNanoUsdPerMillion": 300000000,
+        "cachedInputNanoUsdPerMillion": 6000000,
+        "outputNanoUsdPerMillion": 1200000000,
+        "maxInputTokens": 1048576,
+        "maxOutputTokens": 393216,
+        "supportsReasoning": true
       },
       {
         "alias": "deepseek-pro",
-        "upstreamModel": "deepseek-reasoner",
-        "inputNanoUsdPerMillion": 0,
-        "cachedInputNanoUsdPerMillion": 0,
-        "outputNanoUsdPerMillion": 0,
-        "maxInputTokens": 128000,
-        "maxOutputTokens": 8192,
+        "upstreamModel": "deepseek-v4-pro",
+        "inputNanoUsdPerMillion": 1320000000,
+        "cachedInputNanoUsdPerMillion": 44000000,
+        "outputNanoUsdPerMillion": 3960000000,
+        "maxInputTokens": 1048576,
+        "maxOutputTokens": 393216,
         "supportsReasoning": true
       }
     ],
