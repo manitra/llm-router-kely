@@ -144,6 +144,13 @@ public sealed class RouterConfiguration
             EnvironmentAdminName = EnvironmentExpander.Expand(Identity.EnvironmentAdminName, "RouterKely.Identity.EnvironmentAdminName", missing),
             EnvironmentAdminEmail = EnvironmentExpander.Expand(Identity.EnvironmentAdminEmail, "RouterKely.Identity.EnvironmentAdminEmail", missing),
         };
+        if (Statistics.PersistenceDirectoryPath is { } persistenceDirectory)
+        {
+            Statistics.PersistenceDirectoryPath = EnvironmentExpander.Expand(
+                persistenceDirectory,
+                "RouterKely.Statistics.PersistenceDirectoryPath",
+                missing);
+        }
         for (int index = 0; index < Models.Length; index++)
         {
             ModelConfiguration model = Models[index];
@@ -181,6 +188,13 @@ public sealed class RouterConfiguration
         Identity ??= new IdentityConfiguration();
         if (!Path.IsPathRooted(Identity.FilePath))
             Identity.FilePath = Path.Combine(configurationDirectory, Identity.FilePath);
+
+        Statistics ??= new StatisticsConfiguration();
+        if (Statistics.PersistenceDirectoryPath is { Length: > 0 } persistenceDirectory &&
+            !Path.IsPathRooted(persistenceDirectory))
+        {
+            Statistics.PersistenceDirectoryPath = Path.Combine(configurationDirectory, persistenceDirectory);
+        }
     }
 
     internal void Validate()
@@ -289,6 +303,16 @@ public sealed class StatisticsConfiguration
 
     public int DailyRetentionDays { get; init; } = 7;
 
+    /// <summary>
+    /// Directory holding the durable per-day usage files. Empty or absent keeps the default
+    /// in-memory-only behaviour.
+    /// </summary>
+    public string? PersistenceDirectoryPath { get; set; }
+
+    /// <summary>The configured directory when persistence is on, otherwise <see langword="null"/>.</summary>
+    internal string? EffectivePersistenceDirectoryPath =>
+        string.IsNullOrEmpty(PersistenceDirectoryPath) ? null : PersistenceDirectoryPath;
+
     internal void Validate()
     {
         if (FlushIntervalMilliseconds is < 100 or > 60_000)
@@ -297,6 +321,9 @@ public sealed class StatisticsConfiguration
             throw new InvalidOperationException("Statistics.HourlyRetentionHours must be between 1 and 168.");
         if (DailyRetentionDays is < 1 or > 31)
             throw new InvalidOperationException("Statistics.DailyRetentionDays must be between 1 and 31.");
+        if (PersistenceDirectoryPath is { Length: > 0 } path && string.IsNullOrWhiteSpace(path))
+            throw new InvalidOperationException(
+                "Statistics.PersistenceDirectoryPath must be a directory path, or empty to run without persistence.");
     }
 }
 

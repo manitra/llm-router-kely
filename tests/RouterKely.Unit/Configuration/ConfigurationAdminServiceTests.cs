@@ -250,6 +250,50 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
         Assert.Contains("model routes", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void SaveRoundTripsTheStatisticsPersistenceDirectory()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.StatisticsPersistenceDirectoryPath = "/data/usage";
+
+        service.Save(form);
+
+        Assert.Equal("/data/usage", service.LoadRaw().RouterKely.Statistics.PersistenceDirectoryPath);
+        Assert.Equal(
+            "/data/usage",
+            ConfigurationAdminService.ToForm(service.LoadRaw()).StatisticsPersistenceDirectoryPath);
+    }
+
+    [Fact]
+    public void SaveResolvesARelativePersistenceDirectoryAgainstTheConfigurationDirectory()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.StatisticsPersistenceDirectoryPath = "usage";
+
+        service.Save(form);
+
+        Assert.Equal(
+            Path.Combine(Path.GetDirectoryName(_tempPath)!, "usage"),
+            service.LoadRaw().RouterKely.Statistics.PersistenceDirectoryPath);
+    }
+
+    [Fact]
+    public void SaveTreatsABlankPersistenceDirectoryAsDisabled()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.StatisticsPersistenceDirectoryPath = "   ";
+
+        service.Save(form);
+
+        Assert.Null(service.LoadRaw().RouterKely.Statistics.PersistenceDirectoryPath);
+    }
+
     private void Seed()
     {
         string template = Path.Combine(

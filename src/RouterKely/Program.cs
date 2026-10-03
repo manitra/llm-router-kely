@@ -62,7 +62,7 @@ var authenticator = new ApiKeyAuthenticator(
     configuration.Identity.EnvironmentAdminKeyId,
     "Environment administrator",
     fileIdentities);
-var statistics = new InMemoryStatisticsProvider(
+var inMemoryStatistics = new InMemoryStatisticsProvider(
     configuration.Statistics.HourlyRetentionHours,
     configuration.Statistics.DailyRetentionDays);
 var usage = new UsageAccumulator(
@@ -75,18 +75,48 @@ var runtime = new RouterRuntime(
     authenticator,
     usage,
     configuration);
+// Reads always hit the in-memory provider, which holds the live counters plus whatever startup
+// restored. The durable decorator is installed on the write path only.
 var compatibility = new CompatibilityService(
     authenticator,
     runtime,
     usage,
-    statistics);
+    inMemoryStatistics);
 
+// The hosted-service factory runs when the host starts, so reassigning this variable after the
+// application is built still hands the pump the durable provider - and only then, so a corrupt
+// usage store fails startup before any request is served.
+IStatisticsProvider pumpStatistics = inMemoryStatistics;
 builder.Services.AddSingleton<IHostedService>(_ => new StatisticsPump(
     usage,
-    statistics,
+    pumpStatistics,
     TimeSpan.FromMilliseconds(configuration.Statistics.FlushIntervalMilliseconds)));
 
 WebApplication app = builder.Build();
+
+if (configuration.Statistics.EffectivePersistenceDirectoryPath is { } usageDirectory)
+{
+    var fileStatistics = new FileStatisticsProvider(
+        inMemoryStatistics,
+        usageDirectory,
+        configuration.Statistics.DailyRetentionDays,
+        app.Logger);
+    IReadOnlyDictionary<long, long> restoredCostByUser;
+    try
+    {
+        restoredCostByUser = await fileStatistics.LoadAsync(CancellationToken.None);
+    }
+    catch (InvalidOperationException exception)
+    {
+        // A damaged usage store is the operator's to repair or delete; failing fast says so plainly.
+        Console.Error.WriteLine($"router-kely: {exception.Message}");
+        return 1;
+    }
+
+    // Seed the current day's consumed quota so a restart cannot hand a user back a spent budget.
+    usage.RestoreDailyCost(restoredCostByUser);
+    pumpStatistics = fileStatistics;
+}
 // The logger comes from the host, so upstream failures land in the platform's log view.
 var proxy = new ProxyService(
     authenticator,

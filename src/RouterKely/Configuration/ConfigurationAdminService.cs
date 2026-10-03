@@ -83,6 +83,7 @@ public sealed class ConfigurationAdminService
             FlushIntervalMilliseconds = ParseBoundedInt(form.StatisticsFlushMs, 100, 60_000, "Flush interval"),
             HourlyRetentionHours = ParseBoundedInt(form.StatisticsHourlyHours, 1, 168, "Hourly retention"),
             DailyRetentionDays = ParseBoundedInt(form.StatisticsDailyDays, 1, 31, "Daily retention"),
+            PersistenceDirectoryPath = NullIfBlank(form.StatisticsPersistenceDirectoryPath?.Trim() ?? string.Empty),
         };
 
         return new LocalConfiguration
@@ -190,6 +191,7 @@ public sealed class ConfigurationAdminService
         StatisticsFlushMs = configuration.RouterKely.Statistics.FlushIntervalMilliseconds.ToString(CultureInfo.InvariantCulture),
         StatisticsHourlyHours = configuration.RouterKely.Statistics.HourlyRetentionHours.ToString(CultureInfo.InvariantCulture),
         StatisticsDailyDays = configuration.RouterKely.Statistics.DailyRetentionDays.ToString(CultureInfo.InvariantCulture),
+        StatisticsPersistenceDirectoryPath = configuration.RouterKely.Statistics.PersistenceDirectoryPath,
         Models = configuration.RouterKely.Models
             .Select(model => new ConfigModelForm
             {
@@ -233,6 +235,7 @@ public sealed class ConfigurationAdminService
             StatisticsFlushMs = form["statisticsFlushMs"].ToString(),
             StatisticsHourlyHours = form["statisticsHourlyHours"].ToString(),
             StatisticsDailyDays = form["statisticsDailyDays"].ToString(),
+            StatisticsPersistenceDirectoryPath = NullIfBlank(form["statisticsPersistenceDirectoryPath"].ToString()),
             Models = ParseModels(form),
         };
     }
@@ -331,6 +334,7 @@ public sealed class ConfigForm
     public string StatisticsFlushMs { get; set; } = "1000";
     public string StatisticsHourlyHours { get; set; } = "72";
     public string StatisticsDailyDays { get; set; } = "7";
+    public string? StatisticsPersistenceDirectoryPath { get; set; }
     public ConfigModelForm[] Models { get; set; } = [];
 }
 

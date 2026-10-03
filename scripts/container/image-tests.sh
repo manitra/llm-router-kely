@@ -117,7 +117,7 @@ prepare_unusable_volume() {
 # BuildKit only applies the ignore file that sits next to the Dockerfile and is named
 # after it, so this guards against the rules silently going unused after a rename.
 assert_build_context_is_filtered() {
-  echo "==> Asserting the build context excludes bin, obj, dotfiles, and local secrets"
+  echo "==> Asserting the build context excludes bin, obj, dotfiles, local config and usage stores"
   local ignore_file="$container_dir/Dockerfile.dockerignore"
   local probe_dir="$work_dir/ignore-probe"
   if [[ ! -f "$ignore_file" ]]; then
@@ -129,13 +129,14 @@ assert_build_context_is_filtered() {
   probe_base="$(sed -n 's/^FROM \(.*\) AS runtime$/\1/p' "$container_dir/Dockerfile" | head -1)"
   [[ -n "$probe_base" ]] || fail "could not read the runtime base image from the Dockerfile"
   mkdir -p "$probe_dir/ctx/src/RouterKely/obj" "$probe_dir/ctx/.git" \
-    "$probe_dir/ctx/config" "$probe_dir/ctx/scripts"
+    "$probe_dir/ctx/config/usage-history" "$probe_dir/ctx/config/custom-store" \
+    "$probe_dir/ctx/scripts"
   cp "$ignore_file" "$probe_dir/Dockerfile.dockerignore"
   cat > "$probe_dir/Dockerfile" <<DOCKERFILE
 FROM ${probe_base}
 COPY . /ctx
 RUN set -eu; \\
-    for leaked in src/RouterKely/obj/compiled.bin .git/index config/router-kely.local.json scripts/.tmp-run.log; do \\
+    for leaked in src/RouterKely/obj/compiled.bin .git/index config/router-kely.local.json config/router-kely.identities.json config/usage-history/2026-01-01.json config/custom-store/2026-01-01.json scripts/.tmp-run.log; do \\
       if [ -e "/ctx/\${leaked}" ]; then echo "leaked into context: \${leaked}" >&2; exit 1; fi; \\
     done; \\
     for kept in scripts/tests.sh config/router-kely.local.json.example; do \\
@@ -145,7 +146,10 @@ DOCKERFILE
   touch "$probe_dir/ctx/src/RouterKely/obj/compiled.bin" \
     "$probe_dir/ctx/.git/index" \
     "$probe_dir/ctx/config/router-kely.local.json" \
+    "$probe_dir/ctx/config/router-kely.identities.json" \
     "$probe_dir/ctx/config/router-kely.local.json.example" \
+    "$probe_dir/ctx/config/usage-history/2026-01-01.json" \
+    "$probe_dir/ctx/config/custom-store/2026-01-01.json" \
     "$probe_dir/ctx/scripts/.tmp-run.log" \
     "$probe_dir/ctx/scripts/tests.sh"
   if ! docker build --file "$probe_dir/Dockerfile" --tag "$probe_image" "$probe_dir/ctx" \

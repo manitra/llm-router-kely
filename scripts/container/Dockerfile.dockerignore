@@ -7,5 +7,7 @@
 .github/
 TestResults/
 scripts/.tmp*
-config/router-kely.local.json
-config/router-kely.identities.json
+# Only the templates the build embeds are sent; local config, identity files and any
+# statistics.persistenceDirectoryPath store stay out, whatever they are named.
+config/*
+!config/*.example

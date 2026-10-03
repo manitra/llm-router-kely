@@ -112,10 +112,23 @@ public sealed class RouterRuntimeTests : IDisposable
         IReadOnlyList<string> restartRequired = await runtime.ReloadAsync(CancellationToken.None);
 
         Assert.Contains("Listen URL", restartRequired);
-        Assert.Contains("Statistics retention and flush interval", restartRequired);
+        Assert.Contains("Statistics retention, flush interval and persistence directory", restartRequired);
         // The reported field is still applied to the file and visible, even though the listener keeps
         // the address the process was started with.
         Assert.Equal("http://127.0.0.1:18099", runtime.Current.Configuration.ListenUrl);
+    }
+
+    [Fact]
+    public async Task ReloadReportsThePersistenceDirectoryAsRestartOnly()
+    {
+        WriteConfiguration(Config(FastModel));
+        (RouterRuntime runtime, _, _) = Compose(IdentitySnapshot.Empty);
+
+        WriteConfiguration(Config(FastModel, persistenceDirectory: "/data/usage"));
+        IReadOnlyList<string> restartRequired = await runtime.ReloadAsync(CancellationToken.None);
+
+        Assert.Contains("Statistics retention, flush interval and persistence directory", restartRequired);
+        Assert.Equal("/data/usage", runtime.Current.Configuration.Statistics.PersistenceDirectoryPath);
     }
 
     private (RouterRuntime Runtime, ApiKeyAuthenticator Authenticator, UsageAccumulator Usage) Compose(
@@ -149,7 +162,8 @@ public sealed class RouterRuntimeTests : IDisposable
         string clientApiKey = "sk-rk-admin-1",
         string upstreamBaseUrl = "https://api.deepseek.com/v1/",
         int maxRequestBodyBytes = 1_024,
-        int hourlyRetentionHours = 72) => $$"""
+        int hourlyRetentionHours = 72,
+        string persistenceDirectory = "") => $$"""
         {
           "routerKely": {
             "listenUrl": "{{listenUrl}}",
@@ -172,7 +186,8 @@ public sealed class RouterRuntimeTests : IDisposable
             "statistics": {
               "flushIntervalMilliseconds": 1000,
               "hourlyRetentionHours": {{hourlyRetentionHours}},
-              "dailyRetentionDays": 7
+              "dailyRetentionDays": 7,
+              "persistenceDirectoryPath": "{{persistenceDirectory}}"
             },
             "maxRequestBodyBytes": {{maxRequestBodyBytes}},
             "maxModelPrefixBytes": 128,

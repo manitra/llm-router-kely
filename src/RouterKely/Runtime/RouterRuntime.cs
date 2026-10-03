@@ -148,8 +148,12 @@ public sealed class RouterRuntime
             fields.Add("Identity file and limits");
         if (running.Statistics.FlushIntervalMilliseconds != next.Statistics.FlushIntervalMilliseconds ||
             running.Statistics.HourlyRetentionHours != next.Statistics.HourlyRetentionHours ||
-            running.Statistics.DailyRetentionDays != next.Statistics.DailyRetentionDays)
-            fields.Add("Statistics retention and flush interval");
+            running.Statistics.DailyRetentionDays != next.Statistics.DailyRetentionDays ||
+            !string.Equals(
+                running.Statistics.EffectivePersistenceDirectoryPath,
+                next.Statistics.EffectivePersistenceDirectoryPath,
+                StringComparison.Ordinal))
+            fields.Add("Statistics retention, flush interval and persistence directory");
         return fields;
     }
 }

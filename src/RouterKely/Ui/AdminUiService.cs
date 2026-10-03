@@ -505,6 +505,11 @@ public sealed class AdminUiService
             .Append(Encode(form.StatisticsHourlyHours)).Append("\"></label>");
         html.Append("<label>Daily retention (days) <input name=\"statisticsDailyDays\" type=\"number\" min=\"1\" required value=\"")
             .Append(Encode(form.StatisticsDailyDays)).Append("\"></label>");
+        html.Append("<label>Usage store directory (blank = in-memory only) <input name=\"statisticsPersistenceDirectoryPath\" value=\"")
+            .Append(Encode(form.StatisticsPersistenceDirectoryPath ?? string.Empty)).Append("\"></label>");
+        html.Append("<p><small>Daily usage is written here as one file per UTC day and restored on startup. "
+            + "A relative path is resolved against the configuration file's directory; a container should "
+            + "use an absolute path such as <code>/data/usage</code>. Changing this needs a restart.</small></p>");
         html.Append("</fieldset>");
 
         html.Append("<button type=\"submit\">Save configuration</button></form>");

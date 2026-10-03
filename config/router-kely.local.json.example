@@ -41,7 +41,8 @@
     "statistics": {
       "flushIntervalMilliseconds": 1000,
       "hourlyRetentionHours": 72,
-      "dailyRetentionDays": 7
+      "dailyRetentionDays": 7,
+      "persistenceDirectoryPath": ""
     },
     "maxRequestBodyBytes": 33554432,
     "maxModelPrefixBytes": 65536,
