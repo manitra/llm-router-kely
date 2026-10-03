@@ -52,7 +52,7 @@ A deployment must provide three things, or the container exits at startup:
 |---|---|
 | `ROUTERKELY_ADMIN_API_KEY` | The administrator bearer key. Read at startup, never written to disk. |
 | `ROUTERKELY_DEEPSEEK_API_KEY` | The upstream credential. Read at startup, never written to disk. |
-| A volume mounted at `/data` | Holds the configuration file and the identity file the admin UI rewrites. |
+| A volume mounted at `/data` | Holds the configuration file, the identity file the admin UI rewrites, and — when durable statistics are enabled — the per-day usage store. |
 
 ```bash
 docker run -d --name router-kely -p 8080:8080 \
@@ -69,6 +69,8 @@ The container also carries `org.opencontainers.image.description` and `...url` l
 Use a **named** volume, not a host bind mount: a named volume inherits the ownership of the image's `/data` directory and needs no preparation. A bind mount must be chowned to `1654:1654` first, because the container runs unprivileged for its whole lifetime and never takes ownership of a mount. The container refuses to start with that exact instruction if it cannot write to `/data`.
 
 On the first start the router creates `/data/router-kely.local.json` from its embedded default. Edit it and restart the container to apply changes, or manage users in the admin UI. Secrets live in the environment, never in the volume.
+
+Daily usage lives in memory and resets on restart unless you set `statistics.persistenceDirectoryPath` (for example `/data/usage`). With it set, the router writes one small JSON file per UTC day, restores it at startup, and seeds each user's consumed daily quota so a restart cannot hand back a budget that was already spent. The directory follows `statistics.dailyRetentionDays`, the setting is restart-only, and the admin **Usage** page says which mode is active. Inference latency and per-request allocation are unchanged: all of that work happens on the background statistics pump.
 
 ### Coolify
 

@@ -67,6 +67,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Response behavior | Preserve upstream status, body bytes, and streaming behavior; do not translate response bodies. |
 | Identity state | Default: one atomically replaced configuration file containing users, quotas, and key hashes, plus one environment-supplied administrator key. |
 | Statistics | Default: bounded in-memory hourly/daily aggregates; loss on restart is accepted. |
+| Durable statistics | Optional and off by default: a built-in file adapter writes one JSON document per UTC day on the statistics pump's cold path and restores it at startup, then seeds each user's current-day consumed quota so a restart cannot hand back a spent budget. No database, ORM, or added package. |
 | Optional persistence | A later PostgreSQL adapter may own identity, statistics, or both. It is not part of the default executable or MVP dependency graph. |
 | Provider boundary | Narrow startup/control-plane ports selected at build/startup; no dynamic assembly loading, reflection discovery, or provider call on an inference request. |
 | Quota strictness | Soft admission limit based on confirmed local usage; explicitly bounded concurrent overshoot and explicit default-provider restart-reset semantics. |
@@ -142,7 +143,7 @@ An inference handler may depend only on preconstructed singleton services and im
 
 1. Parse and validate configuration. Create the configuration file from the built-in default when it is absent. Resolve every `${NAME}` reference, reporting all unresolved ones in a single error. Refuse startup on missing secrets, duplicate aliases, invalid prices, or a non-HTTPS upstream unless explicitly in development mode.
 2. Load and validate the configured identity provider. By default, read the identity file and hash the environment-supplied administrator key directly into the snapshot.
-3. Initialize empty current-day and historical in-memory aggregates. A restart intentionally starts usage at zero for the default statistics provider.
+3. Initialize in-memory aggregates: empty for the default provider, or restored from the optional durable statistics store (section 12.5) when one is configured. Restoration installs the retained days and seeds the current UTC day's per-user cost before readiness becomes true, so no request is served against half-restored state. With the default provider a restart intentionally starts usage at zero.
 4. Create the singleton `SocketsHttpHandler` and `HttpMessageInvoker`.
 5. Verify that the configured upstream base URI is syntactically valid. A network call is not required for liveness.
 6. Start the UTC rollover/retention tick and, when enabled, the identity-file watcher.
@@ -461,6 +462,10 @@ Four settings are bound to a fixed resource and cannot be replaced while the pro
 
 The model list is variable-length. Its rows are posted with indexed names (`models[0].alias`, `models[1].upstreamModel`, …) so any number of rows round-trips without positional guessing; an unchecked `supportsReasoning` checkbox is simply absent for its own index and never shifts later rows. Each row carries a `Remove model #N` button and the fieldset carries an `Add model` button; both post the whole form to `/ui/actions/config/models` with `formnovalidate`, which adds or drops one row and re-renders the editor without saving, so the operator can review every value before committing with the single `Save configuration` button. The last remaining row cannot be removed and the list cannot exceed 64 rows; both limits are enforced by the same validation the startup path runs.
 
+Every administration page — the user list, the add/edit user form, the key-created page, the configuration editor, and the usage page — begins with the same navigation element, rendered without JavaScript as a `<details>` disclosure whose summary reads `☰ Menu` and whose list links to Users, Config, and Usage and ends with the sign-out action. Placing the menu first and keeping sign-out inside it means every page exposes the same controls in the same position, and the user pages need no separate back link because the menu already links to the user list. It needs no script, no `unsafe-inline` style, and no stylesheet beyond the vendored Pico CSS.
+
+`/ui/admin/usage` presents the retained daily aggregates: headline totals (spend, requests, prompt and completion tokens, active users, and the covered date range), then one table row per user with a column per UTC day plus a total column, and a footer that totals every column. A cell shows that day's request count and spend; days with no traffic are shown as a dash, and leading empty days are trimmed. A user that no longer exists keeps its row, labelled with its numeric ID and `(removed)`. The page states whether daily usage is persisted to disk or in-memory only, and that quota is enforced per process, so it never reads as a billing ledger. It is strictly read-only: it accepts no form, no query parameter, and no CSRF token, and requires the same admin session as every other administration page.
+
 ### 10.2 Browser session
 
 `POST /ui/login` accepts an LLM Router Kely key over TLS, authenticates it using the normal in-memory lookup, and creates a 256-bit opaque random session ID. The session is stored only in a bounded in-memory table and sent in a cookie:
@@ -582,7 +587,7 @@ The default provider retains hourly aggregates for 72 hours and daily aggregates
 
 Counter capacity is planned from the validated identity/model configuration, but hourly detail cells are allocated lazily on first use and then updated without per-completion allocation. Startup computes a conservative worst-case retained-size bound from the actual configured users/keys, models, outcomes, and retention. If that exceeds `MaxBytes`, startup fails explicitly; a control-plane change that would exceed it is rejected. Old buckets are recycled or released on the cold rollover path.
 
-Reads for the UI and compatibility endpoints snapshot the relevant counters without stopping inference. Values may be slightly inconsistent across buckets during a concurrent update; this is acceptable for operational statistics. The atomic per-user current-day cost used for quota admission remains authoritative inside the process.
+Reads for the UI and compatibility endpoints snapshot the relevant counters without stopping inference. Values may be slightly inconsistent across buckets during a concurrent update; this is acceptable for operational statistics. The atomic per-user current-day cost used for quota admission remains authoritative inside the process. The default provider performs no disk writes; an optional durable adapter wraps it without changing any of this (section 12.5).
 
 ### 12.4 Restart and crash semantics
 
@@ -590,9 +595,9 @@ The default provider performs no disk writes. Graceful shutdown and abrupt loss 
 
 An in-process configuration reload is not a restart. Consumed quota, daily counters, and active concurrency slots survive it, so changing models, prices, or limits can never be used to reset a user's spend or their in-flight request accounting.
 
-This means the default quota is a process-local daily guardrail, not a durable billing ledger: restarting LLM Router Kely can grant a user the remainder of the configured daily quota again. This tradeoff is accepted for the default lightweight deployment and MUST be visible in the UI and operations documentation. Deployments that require restart-safe quota enforcement or historical reporting MUST use a persistent statistics adapter such as the future PostgreSQL provider.
+This means the default quota is a process-local daily guardrail, not a durable billing ledger: restarting LLM Router Kely can grant a user the remainder of the configured daily quota again. This tradeoff is accepted for the default lightweight deployment and MUST be visible in the UI and operations documentation. Deployments that require restart-safe quota enforcement or historical reporting across replicas MUST use a persistent statistics adapter such as the future PostgreSQL provider; the built-in durable file adapter (section 12.5) covers the single-replica case.
 
-No local WAL, periodic snapshot, or shutdown flush exists in the default provider. Adding one to the core is forbidden without benchmark evidence and a specification change.
+No local WAL, periodic snapshot, or shutdown flush exists in the **default** provider, and no inference request performs file or database I/O. Durable statistics are provided by an optional, explicitly wired adapter (section 12.5), off unless `statistics.persistenceDirectoryPath` is configured; with it unset the behaviour above is unchanged. The adapter adds no per-request work, no inference-path provider call, and no new dependency, and the performance harness measures a router with persistence enabled against the same `<= 8 KiB` allocation, single-published-file, and 20-MiB binary budgets as the default configuration (section 18.3).
 
 ### 12.5 Optional persistent statistics provider contract
 
@@ -604,6 +609,15 @@ A persistent adapter MAY consume immutable aggregate batches on a background col
 - readiness fails before unpersisted state can grow without bound;
 - restored usage is installed before readiness becomes true;
 - disabling/removing the adapter yields exactly the default in-memory behavior.
+
+The default executable ships one such adapter, disabled unless `statistics.persistenceDirectoryPath` is set:
+
+- It decorates the in-memory provider on the pump's write path only. `QueryAsync` and `QueryUsageRowsAsync` read the decorated in-memory state, which holds both live and restored counters, so a read never touches disk.
+- Each flush merges the batch into the in-memory provider, then rewrites one versioned JSON document per dirty UTC day at `{directory}/{yyyy-MM-dd}.json` through a same-directory temporary file, an fsync, and an atomic rename. A day with no new aggregate is never rewritten, so an idle process performs no I/O.
+- Files older than `dailyRetentionDays`, and abandoned temporary files, are removed on the same cold path.
+- Startup reads the retained day files, installs them into the in-memory provider without creating hourly buckets (historical daily data has no hour), and returns the current UTC day's cost per user. The composition root seeds the per-user daily quota counter with that value before readiness. Earlier days are restored for reporting but never charged to the current day.
+- A missing directory is a first start and restores nothing. An unreadable, malformed, wrong-version, or self-inconsistent day file fails startup with the offending path and a remedy; a write failure is logged once per episode and never fails the flush, so a full disk cannot stop inference.
+- The on-disk shape is core-owned and serialized with the source generator, so the adapter adds no reflection and no package.
 
 The detailed PostgreSQL flush protocol and schema belong to that adapter's specification when it is implemented, not to the core MVP.
 
@@ -631,7 +645,7 @@ The environment administrator has a reserved stable user/key ID configured along
 
 The statistics provider receives already-bounded aggregate state outside the inference path and supplies optional startup recovery/reporting. The default provider is the in-memory implementation in section 12. A provider may implement identity only, statistics only, or both; selection is explicit so mixed deployments are possible.
 
-Provider contracts MUST use core-owned primitive/value types and immutable batches. Core MUST NOT reference provider-specific connection, SQL, migration, retry, or serialization types. Provider callbacks never execute inline on an inference request.
+Provider contracts MUST use core-owned primitive/value types and immutable batches: the statistics port carries immutable `UsageAggregate[]` batches in and `DailyUsage`/`UsageRow` projections out, and never a provider-specific connection, row, or serialization type. Core MUST NOT reference provider-specific connection, SQL, migration, retry, or serialization types. Provider callbacks never execute inline on an inference request.
 
 ### 13.3 Future PostgreSQL adapter
 
@@ -825,7 +839,7 @@ The default provider returns only retained in-memory days. A newly started proce
 
 ## 15. Configuration
 
-Runtime configuration is read at startup from `appsettings.json` plus environment variables. Secrets MUST come from environment variables or mounted secret files, not the image. The identity file may be atomically replaced and reloaded without restarting. A save from the admin UI re-reads and re-validates the configuration file and swaps the running model, upstream and limit values on the next request; only the listener, the connection pool and process concurrency limit, statistics flush and retention, and the identity file path and capacity still require a restart (section 10.1).
+Runtime configuration is read at startup from `appsettings.json` plus environment variables. Secrets MUST come from environment variables or mounted secret files, not the image. The identity file may be atomically replaced and reloaded without restarting. A save from the admin UI re-reads and re-validates the configuration file and swaps the running model, upstream and limit values on the next request; only the listener, the connection pool and process concurrency limit, statistics flush, retention and durable-store directory, and the identity file path and capacity still require a restart (section 10.1).
 
 Example:
 
@@ -879,7 +893,8 @@ Example:
       "Provider": "memory",
       "HourlyRetentionHours": 72,
       "DailyRetentionDays": 7,
-      "MaxBytes": 16777216
+      "MaxBytes": 16777216,
+      "PersistenceDirectoryPath": null
     },
     "Compatibility": {
       "EnableUnversionedInferenceAliases": true,
@@ -890,6 +905,8 @@ Example:
 ```
 
 Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing. The shipped defaults use DeepSeek's peak rates (off-peak is billed at half the peak rate), which keeps the quota guardrail conservative, plus DeepSeek's published 1,048,576-token context and 393,216-token maximum output caps.
+
+`statistics.persistenceDirectoryPath` is the durable-statistics switch (section 12.5). Empty or absent keeps the default in-memory-only behaviour; a value names the directory that holds the per-day usage files, relative to the configuration file's directory when not rooted. It is restart-only, and the container should point it at the writable volume, for example `/data/usage`.
 
 #### First start and environment expansion
 
@@ -1170,6 +1187,8 @@ A further phase streams a scripted Server-Sent-Events response and asserts that 
 
 A second, always-on parallel phase covers the process-wide limit, which the per-user smoke cannot reach. It runs against its own router instance because the process-wide and per-user concurrency limits are bound to a fixed resource and can only be set at startup. It configures 32 slots with a 100 ms scripted upstream lag, fills every slot deterministically, and proves that requests above the limit are rejected immediately with the process-limit error and never reach the upstream. It then soaks the same limit with 32 and with 40 closed-loop workers for 1.2 s each. Every request carries a unique nonce that the mock upstream echoes back as the response id, so a response delivered for another request fails the run; the phase additionally asserts that upstream concurrency never exceeds the limit, that slots are released and reused, and that no admitted call is lost. The whole phase is bounded to about three seconds, needs no configuration, and runs on every commit.
 
+A durable-statistics phase runs one router with `statistics.persistenceDirectoryPath` set, drives a warm-up and a measured batch of 1-KiB completions, and then restarts the process against the same store. It asserts that a day file was written, that the restarted process reports the restored spend through `/key/info`, and that `/ui/admin/usage` renders the restored per-user aggregates while redirecting an unauthenticated request to the login page. It reports allocated bytes per routed request and enforces the same `<= 8 KiB` limit, so enabling persistence cannot hide a data-plane allocation regression.
+
 GitHub Actions runs `scripts/tests.sh` on every pushed commit and pull request. Every run renders a job summary through `scripts/ci-summary.sh`: the unit-test pass/fail/skip counts and the complete performance report printed by the harness (direct, routed, and incremental p50/p95/p99 latency, throughput, allocated bytes per routed request, idle working set, Native AOT binary size, publish-file count, and the admin-UI, concurrency and parallel smoke results), each compared against its budget. The summary always renders whatever the log contains so failed runs stay diagnosable. After a successful push to `main`, the same script also extracts the unit-test count, the p50 incremental overhead (rendered in microseconds), allocated bytes per routed request, and Native AOT binary size into Shields-compatible JSON artifacts; a separate least-privilege workflow publishes only those artifacts through GitHub Pages so badge publication cannot affect the test result.
 
 The harness may set `Upstream.AllowInsecureLoopback=true` only for a loopback HTTP mock. The option never permits plaintext traffic to a non-loopback address and defaults to false.
@@ -1272,7 +1291,7 @@ The MVP is releasable only when all items pass.
 - [ ] User can view own usage/quota and create/rename/revoke only own keys.
 - [ ] No key/team/model quota exists; user quota is the only budget value.
 - [ ] Plaintext keys are shown once and cannot be recovered.
-- [ ] Default current-day usage and quota consumption reset on restart, and the UI labels this behavior clearly.
+- [ ] Default current-day usage and quota consumption reset on restart with the default statistics provider, and the UI labels this behavior clearly; with `statistics.persistenceDirectoryPath` set, both are restored before readiness and the usage page says so.
 - [ ] LiteLLM profile endpoints return documented schemas and pass captured coding-client fixtures.
 - [ ] Saving the admin configuration applies models, upstream credentials, quotas and limits without a restart, and the response names any setting that still needs one.
 - [ ] An invalid saved configuration is refused before it is written, and a reload failure leaves the previous snapshot running.
@@ -1296,6 +1315,7 @@ The MVP is releasable only when all items pass.
 - [ ] Identity-file corruption/reload failure preserves the last valid snapshot and reports degraded readiness.
 - [ ] A configuration reload preserves consumed quota, daily counters, and active concurrency slots.
 - [ ] Statistics retention and configured identity cardinality remain strictly bounded.
+- [ ] The durable statistics store is written atomically, pruned to `dailyRetentionDays`, restores rows and the current-day per-user cost before readiness, and fails startup with a remedy on a corrupt file while a write failure never fails a flush.
 - [ ] AOT publish has zero trim/AOT warnings; container and dependency scans have no unwaived critical finding.
 - [ ] Graceful shutdown and documented restart-reset behavior tests pass.
 
@@ -1303,6 +1323,7 @@ The MVP is releasable only when all items pass.
 
 - [ ] Every hard metric in section 18.1 passes on the reference environment.
 - [ ] A 30-minute soak at 64 concurrent SSE streams shows stable RSS, handle/socket counts, and bounded statistics state.
+- [ ] The performance harness passes with `statistics.persistenceDirectoryPath` set, including the `<= 8 KiB` allocation budget per routed request and the exactly-one-published-file rule.
 - [ ] A burst to 256 streams remains under 250 MiB with no OOM, deadlock, or unbounded queue.
 - [ ] Benchmark results and comparison with the default branch are attached to the release.
 
@@ -1376,6 +1397,8 @@ Recommended layout:
 
 ```text
 /src/RouterKely                 executable, routes, proxy, UI, workers
+/src/RouterKely/Statistics      statistics pump and the optional durable daily-usage store (cold path only)
+/src/RouterKely/Ui              server-rendered administration pages, including the usage page
 /src/RouterKely.Core            allocation-sensitive value types/state machines if separation helps AOT
 /tests/RouterKely.Unit
 /tests/RouterKely.Integration
@@ -1395,6 +1418,8 @@ Keep project count low; separation must not create abstraction overhead. The imp
 Required engineering rules:
 
 - No LINQ, regex, interpolation-based success logging, `MemoryStream`, body-to-string conversion, or exception-driven expected flow on the inference path.
+- File-based durability lives on the statistics pump path only; an inference request never performs file or database I/O, and enabling persistence must not add per-request allocation.
+- `config/` tracks templates only. The repository and build-context ignore rules exclude everything under it except `*.example`, so the live configuration, the identity file, and any `statistics.persistenceDirectoryPath` store stay out of Git and out of the Docker build context no matter what the operator names them; the enumerated per-file rules this replaced did not survive a custom store name.
 - Use spans, sequences, pipelines, pooled buffers, `ValueTask`, and source generation only where measurement/test supports correctness and lower allocation.
 - Pool ownership must be explicit and exception/cancellation safe.
 - Avoid async state-machine creation in tight per-segment loops where a synchronous fast path is available.
