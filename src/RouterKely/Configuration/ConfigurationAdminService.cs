@@ -94,7 +94,7 @@ public sealed class ConfigurationAdminService
                 Upstream = upstream,
                 Identity = identity,
                 Models = models,
-                DailyQuotaNanoUsd = ParseOptionalNonNegativeLong(form.DailyQuotaUsd, "Daily quota"),
+                DailyQuotaNanoUsd = ParseOptionalQuotaUsd(form.DailyQuotaUsd),
                 Statistics = statistics,
                 MaxRequestBodyBytes = ParseBoundedInt(form.MaxRequestBodyBytes, 1, 1_073_741_824, "Max request body"),
                 MaxModelPrefixBytes = ParseBoundedInt(form.MaxModelPrefixBytes, 1, 1_048_576, "Max model prefix"),
@@ -139,13 +139,18 @@ public sealed class ConfigurationAdminService
         return parsed;
     }
 
-    private static long? ParseOptionalNonNegativeLong(string? value, string field)
+    private static long? ParseOptionalQuotaUsd(string? value)
     {
+        // The form field is a USD amount (see ToForm); convert it to the nanoUSD integer the
+        // configuration stores, matching the per-user quota field on the users page.
         if (string.IsNullOrWhiteSpace(value))
             return null;
-        if (!long.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out long parsed) || parsed < 0)
-            throw new InvalidOperationException($"{field} must be a non-negative integer or empty.");
-        return parsed;
+        if (!decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal usd) || usd < 0)
+            throw new InvalidOperationException("Daily quota must be a non-negative USD amount or empty.");
+        decimal nanoUsd = decimal.Ceiling(usd * 1_000_000_000m);
+        if (nanoUsd > long.MaxValue)
+            throw new InvalidOperationException("Daily quota is too large.");
+        return (long)nanoUsd;
     }
 
     private static int ParseBoundedInt(string value, int min, int max, string field)

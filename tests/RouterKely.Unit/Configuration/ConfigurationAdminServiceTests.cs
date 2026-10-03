@@ -96,6 +96,35 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     }
 
     [Fact]
+    public void SaveRoundTripsDailyQuotaUsd()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.DailyQuotaUsd = "10";
+
+        service.Save(form);
+
+        Assert.Equal(10_000_000_000, service.LoadRaw().RouterKely.DailyQuotaNanoUsd);
+        Assert.Equal("10", ConfigurationAdminService.ToForm(service.LoadRaw()).DailyQuotaUsd);
+    }
+
+    [Fact]
+    public void SaveRoundTripsFractionalDailyQuota()
+    {
+        // A nanoUSD value below 1 USD renders as a fraction; the editor used to reject it.
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.DailyQuotaUsd = "0.00000001";
+
+        service.Save(form);
+
+        Assert.Equal(10, service.LoadRaw().RouterKely.DailyQuotaNanoUsd);
+        Assert.Equal("0.00000001", ConfigurationAdminService.ToForm(service.LoadRaw()).DailyQuotaUsd);
+    }
+
+    [Fact]
     public void ToFormKeepsModelPriceInNanoUsdPerMillion()
     {
         Seed();
