@@ -245,6 +245,29 @@ static async Task RunAdminUiSmokeAsync(string routerUrl, string mockUrl)
     string usersCsrf = ExtractBetween(usersHtml, "name=\"csrf\" value=\"", "\"");
     if (!usersHtml.Contains("/ui/admin/users/new"))
         throw new InvalidOperationException("Admin users list is missing the add-user link.");
+    string usersMenu = ExtractBetween(usersHtml, "<nav>", "</nav>");
+    foreach (string expected in new[]
+             {
+                 "href=\"/ui/admin/users\"",
+                 "href=\"/ui/admin/config\"",
+                 "href=\"/ui/admin/usage\"",
+                 "action=\"/ui/logout\""
+             })
+    {
+        if (!usersMenu.Contains(expected, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Admin menu is missing '{expected}'.");
+    }
+    if (!usersHtml.Contains("<body><main><nav>", StringComparison.Ordinal))
+        throw new InvalidOperationException("Admin menu is not the first element of the users page body.");
+    using (HttpResponseMessage usage = await client.GetAsync($"{routerUrl}/ui/admin/usage"))
+    {
+        EnsureStatus(usage, HttpStatusCode.OK, "usage page");
+        string usageHtml = await usage.Content.ReadAsStringAsync();
+        if (!usageHtml.Contains("<h1>Usage</h1>", StringComparison.Ordinal) ||
+            !usageHtml.Contains("By user", StringComparison.Ordinal) ||
+            !usageHtml.Contains("/ui/admin/usage", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin usage page did not render the per-user table.");
+    }
     using (var saveUser = new HttpRequestMessage(HttpMethod.Post, $"{routerUrl}/ui/actions/users"))
     {
         saveUser.Headers.Add("Origin", origin);
@@ -265,6 +288,8 @@ static async Task RunAdminUiSmokeAsync(string routerUrl, string mockUrl)
     {
         EnsureStatus(user, HttpStatusCode.OK, "user page");
         userHtml = await user.Content.ReadAsStringAsync();
+        if (!userHtml.Contains("<body><main><nav>", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin menu is not the first element of the user page body.");
     }
 
     string userCsrf = ExtractBetween(userHtml, "name=\"csrf\" value=\"", "\"");
@@ -353,6 +378,8 @@ static async Task RunAdminUiSmokeAsync(string routerUrl, string mockUrl)
         configHtml = await configPage.Content.ReadAsStringAsync();
         if (!configHtml.Contains("name=\"listenUrl\"", StringComparison.Ordinal))
             throw new InvalidOperationException("Admin config page is missing the expected editor fields.");
+        if (!configHtml.Contains("name=\"statisticsPersistenceDirectoryPath\"", StringComparison.Ordinal))
+            throw new InvalidOperationException("Admin config page is missing the usage store directory field.");
         if (!configHtml.Contains("name=\"models[0].alias\"", StringComparison.Ordinal) ||
             !configHtml.Contains($"formaction=\"{AdminUiModelsActionPath}\"", StringComparison.Ordinal))
             throw new InvalidOperationException("Admin config page has no indexed model row with an add control.");

@@ -7,6 +7,7 @@ using RouterKely.Configuration;
 using RouterKely.Core.Authentication;
 using RouterKely.Core.Identity;
 using RouterKely.Core.Security;
+using RouterKely.Core.Statistics;
 using RouterKely.Identity;
 using RouterKely.Runtime;
 
@@ -28,6 +29,8 @@ public sealed class AdminUiService
     private readonly ConfigurationAdminService _configurations;
     private readonly UiSessionStore _sessions;
     private readonly RouterRuntime _runtime;
+    private readonly IStatisticsProvider _statistics;
+    private readonly bool _statisticsPersisted;
     private readonly ILogger _logger;
     private readonly LoginRateLimiter _loginRateLimiter = new();
 
@@ -37,6 +40,8 @@ public sealed class AdminUiService
         ConfigurationAdminService configurations,
         UiSessionStore sessions,
         RouterRuntime runtime,
+        IStatisticsProvider statistics,
+        bool statisticsPersisted,
         ILogger logger)
     {
         _authenticator = authenticator;
@@ -44,6 +49,8 @@ public sealed class AdminUiService
         _configurations = configurations;
         _sessions = sessions;
         _runtime = runtime;
+        _statistics = statistics;
+        _statisticsPersisted = statisticsPersisted;
         _logger = logger;
     }
 
@@ -137,6 +144,7 @@ public sealed class AdminUiService
             return;
 
         var html = new StringBuilder(4_096);
+        AppendAdminNav(html, session!);
         html.Append("<h1>Users</h1>");
         html.Append("<table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Quota</th><th></th></tr></thead><tbody>");
         foreach (IdentityUser user in _identities.Snapshot.Users.OrderBy(user => user.Id))
@@ -151,8 +159,6 @@ public sealed class AdminUiService
             html.Append("</td></tr>");
         }
         html.Append("</tbody></table><p><a href=\"/ui/admin/users/new\" role=\"button\">Add user</a></p>");
-        AppendAdminNav(html);
-        AppendLogout(html, session!);
         await WritePageAsync(context, "Users", html.ToString());
     }
 
@@ -161,6 +167,27 @@ public sealed class AdminUiService
         if (!RequireAdmin(context, out UiSession? session, out _))
             return;
         await WriteUserFormAsync(context, session!, user: null);
+    }
+
+    /// <summary>
+    /// System usage: headline totals plus one row per user over the retained UTC days. Read-only,
+    /// so it takes no form, no CSRF token and no query parameter - there is no input to exploit.
+    /// </summary>
+    public async Task UsageAsync(HttpContext context)
+    {
+        if (!RequireAdmin(context, out UiSession? session, out _))
+            return;
+
+        DateOnly today = DateOnly.FromDateTime(DateTime.UtcNow);
+        UsageRowsSnapshot rows = await _statistics.QueryUsageRowsAsync(
+            today.AddDays(-AdminUsagePage.WindowDays + 1),
+            today,
+            context.RequestAborted);
+
+        var html = new StringBuilder(8_192);
+        AppendAdminNav(html, session!);
+        html.Append(AdminUsagePage.Render(rows, _identities.Snapshot, today, _statisticsPersisted));
+        await WritePageAsync(context, "Usage", html.ToString());
     }
 
     public async Task UserAsync(HttpContext context, long id)
@@ -182,7 +209,8 @@ public sealed class AdminUiService
     {
         string heading = user is null ? "Add user" : "Edit user";
         var html = new StringBuilder(4_096);
-        html.Append("<p><a href=\"/ui/admin/users\">← Users</a></p><h1>").Append(heading).Append("</h1>");
+        AppendAdminNav(html, session);
+        html.Append("<h1>").Append(heading).Append("</h1>");
 
         html.Append("<form method=\"post\" action=\"/ui/actions/users\">");
         AppendCsrf(html, session);
@@ -267,6 +295,7 @@ public sealed class AdminUiService
                 form["name"].ToString(),
                 context.RequestAborted);
             var html = new StringBuilder(1_024);
+            AppendAdminNav(html, post.Session);
             html.Append("<h1>Key created</h1><p>Copy this key now. It cannot be shown again.</p><pre>")
                 .Append(Encode(generated.Plaintext)).Append("</pre><p><a href=\"/ui/admin/users/").Append(id).Append("\">Continue</a></p>");
             await WritePageAsync(context, "Key created", html.ToString());
@@ -396,7 +425,7 @@ public sealed class AdminUiService
         string? notice = null)
     {
         var html = new StringBuilder(8_192);
-        AppendAdminNav(html);
+        AppendAdminNav(html, session);
         html.Append("<h1>Configuration</h1>");
         html.Append("<p><small>Saved file: <code>")
             .Append(Encode(_configurations.FilePath))
@@ -513,7 +542,6 @@ public sealed class AdminUiService
         html.Append("</fieldset>");
 
         html.Append("<button type=\"submit\">Save configuration</button></form>");
-        AppendLogout(html, session);
         await WritePageAsync(context, "Configuration", html.ToString());
     }
 
@@ -595,17 +623,24 @@ public sealed class AdminUiService
     private static void AppendCsrf(StringBuilder html, UiSession session) =>
         html.Append("<input type=\"hidden\" name=\"csrf\" value=\"").Append(Encode(session.CsrfToken)).Append("\">");
 
-    private static void AppendAdminNav(StringBuilder html) =>
-        html.Append("<nav><a href=\"/ui/admin/users\">Users</a> <a href=\"/ui/admin/config\">Config</a></nav>");
-
-    private static void AppendLogout(StringBuilder html, UiSession session)
+    /// <summary>
+    /// The shared administration menu, rendered first on every page: one no-JavaScript disclosure
+    /// holding the page links and the sign-out action, so navigation and sign-out always sit in the
+    /// same place at the top of the page.
+    /// </summary>
+    private static void AppendAdminNav(StringBuilder html, UiSession session)
     {
-        html.Append("<form method=\"post\" action=\"/ui/logout\">");
+        html.Append("<nav><details><summary>&#9776; Menu</summary><ul>")
+            .Append("<li><a href=\"/ui/admin/users\">Users</a></li>")
+            .Append("<li><a href=\"/ui/admin/config\">Config</a></li>")
+            .Append("<li><a href=\"/ui/admin/usage\">Usage</a></li>")
+            .Append("<li><form method=\"post\" action=\"/ui/logout\">");
         AppendCsrf(html, session);
-        html.Append("<button type=\"submit\">Sign out</button></form>");
+        html.Append("<button type=\"submit\">Sign out</button></form></li>")
+            .Append("</ul></details></nav>");
     }
 
-    private static string Encode(string value) => HtmlEncoder.Default.Encode(value);
+    internal static string Encode(string value) => HtmlEncoder.Default.Encode(value);
 
     private static async Task WriteStatusAsync(HttpContext context, int status, string message)
     {
