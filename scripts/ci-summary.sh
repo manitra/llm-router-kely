@@ -76,6 +76,7 @@ read -r streaming_first streaming_total <<<"$(extract 's/.*streaming:.*first byt
 admin_result="$(extract 's/.*admin UI:[[:space:]]+(PASS).*/\1/p')"
 concurrency_result="$(extract 's/.*concurrency:[[:space:]]+(PASS).*/\1/p')"
 parallel_result="$(extract 's/.*parallel:[[:space:]]+(PASS).*/\1/p')"
+read -r persistence_files persistence_spend persistence_alloc persistence_alloc_limit persistence_result <<<"$(extract 's/.*persistence:[[:space:]]+([0-9,]+) day file\(s\), restored spend ([0-9,]+) nanoUSD, ([0-9,]+) B\/routed request \| limit <= ([0-9,]+) B => (PASS|MISS).*/\1 \2 \3 \4 \5/p')" || true
 
 unit_line="$(grep -E '^(Passed|Failed)! *-' "$log" | tail -1 || true)"
 unit_parsed=0
@@ -164,6 +165,10 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
   printf '| Admin UI smoke | %s | — | %s |\n' "$(value_or_dash "$admin_result")" "$(icon "$admin_result")"
   printf '| Concurrency smoke | %s | — | %s |\n' "$(value_or_dash "$concurrency_result")" "$(icon "$concurrency_result")"
   printf '| Parallel concurrency smoke | %s | — | %s |\n' "$(value_or_dash "$parallel_result")" "$(icon "$parallel_result")"
+  printf '| Durable statistics | %s day file(s) · spend %s nanoUSD · %s B/request | ≤ %s B | %s |\n' \
+    "$(value_or_dash "$persistence_files")" "$(value_or_dash "$persistence_spend")" \
+    "$(value_or_dash "$persistence_alloc")" "$(value_or_dash "$persistence_alloc_limit")" \
+    "$(icon "$persistence_result")"
   printf '| Streaming smoke | first byte %s of %s ms | incremental delivery | %s |\n' \
     "$(value_or_dash "$streaming_first")" "$(value_or_dash "$streaming_total")" "$(icon "$streaming_result")"
 } >>"$summary"

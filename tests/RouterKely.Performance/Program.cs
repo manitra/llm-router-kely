@@ -165,7 +165,15 @@ try
     ParallelSmokeReport parallel = await ParallelSmoke.RunAsync(routerExecutable, temporaryDirectory);
     Console.WriteLine($"  parallel:   {parallel.Detail} in {parallel.ElapsedMilliseconds / 1_000d:F1} s");
 
-    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass || !payloadAllocationPass || !streaming.Passed)
+    Persistence.PersistenceReport persistence = await Persistence.RunAsync(routerExecutable, temporaryDirectory);
+    bool persistenceAllocationPass = persistence.AllocatedBytesPerRequest <= MaxAllocatedBytesPerRequest;
+    Console.WriteLine(
+        $"  persistence: {persistence.DayFileCount} day file(s), restored spend {persistence.RestoredSpendNanoUsd:N0} nanoUSD, "
+        + $"{persistence.AllocatedBytesPerRequest:N0} B/routed request | limit <= {MaxAllocatedBytesPerRequest:N0} B => "
+        + $"{(persistenceAllocationPass ? "PASS" : "MISS")} (enforced) in {persistence.ElapsedMilliseconds / 1_000d:F1} s");
+
+    if (!allocationPass || !memoryPass || !binarySizePass || !fileCountPass || !payloadAllocationPass ||
+        !streaming.Passed || !persistenceAllocationPass)
         return 1;
 
     if (enforce && (overheadP50 >= 0.250 || overheadP99 >= 1.000))

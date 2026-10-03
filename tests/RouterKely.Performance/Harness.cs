@@ -121,7 +121,9 @@ internal static class Harness
         string clientApiKey,
         int maxConcurrentRequests,
         int maxConcurrentRequestsPerUser,
-        IReadOnlyList<(string Alias, string UpstreamModel)>? models = null)
+        IReadOnlyList<(string Alias, string UpstreamModel)>? models = null,
+        string? statisticsDirectory = null,
+        int statisticsFlushMilliseconds = 1_000)
     {
         string path = Path.Combine(directory, fileName);
         var modelRows = (models ?? [(PerfAlias, PerfUpstreamModel)])
@@ -150,9 +152,10 @@ internal static class Harness
                 dailyQuotaNanoUsd = (long?)null,
                 statistics = new
                 {
-                    flushIntervalMilliseconds = 1_000,
+                    flushIntervalMilliseconds = statisticsFlushMilliseconds,
                     hourlyRetentionHours = 72,
-                    dailyRetentionDays = 7
+                    dailyRetentionDays = 7,
+                    persistenceDirectoryPath = statisticsDirectory
                 },
                 maxRequestBodyBytes = 33_554_432,
                 maxModelPrefixBytes = 65_536,
