@@ -75,6 +75,7 @@ public sealed class ConfigurationAdminService
                 MaxInputTokens = ParseOptionalPositiveInt(entry.MaxInputTokens, "Max input tokens"),
                 MaxOutputTokens = ParseOptionalPositiveInt(entry.MaxOutputTokens, "Max output tokens"),
                 SupportsReasoning = entry.SupportsReasoning,
+                SupportsVision = entry.SupportsVision,
             };
         }
 
@@ -203,6 +204,7 @@ public sealed class ConfigurationAdminService
                 MaxInputTokens = model.MaxInputTokens?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
                 MaxOutputTokens = model.MaxOutputTokens?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
                 SupportsReasoning = model.SupportsReasoning,
+                SupportsVision = model.SupportsVision,
             })
             .ToArray(),
     };
@@ -310,6 +312,10 @@ public sealed class ConfigurationAdminService
                 form[prefix + "supportsReasoning"].ToString(),
                 "true",
                 StringComparison.Ordinal),
+            SupportsVision = string.Equals(
+                form[prefix + "supportsVision"].ToString(),
+                "true",
+                StringComparison.Ordinal),
         };
     }
 
@@ -348,4 +354,5 @@ public sealed class ConfigModelForm
     public string? MaxInputTokens { get; set; }
     public string? MaxOutputTokens { get; set; }
     public bool SupportsReasoning { get; set; }
+    public bool SupportsVision { get; set; }
 }

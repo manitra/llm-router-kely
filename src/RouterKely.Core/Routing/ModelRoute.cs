@@ -13,7 +13,8 @@ public sealed class ModelRoute
         long outputNanoUsdPerMillion = 0,
         int? maxInputTokens = null,
         int? maxOutputTokens = null,
-        bool supportsReasoning = false)
+        bool supportsReasoning = false,
+        bool supportsVision = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(alias);
         ArgumentException.ThrowIfNullOrWhiteSpace(upstreamModel);
@@ -27,6 +28,7 @@ public sealed class ModelRoute
         MaxInputTokens = maxInputTokens;
         MaxOutputTokens = maxOutputTokens;
         SupportsReasoning = supportsReasoning;
+        SupportsVision = supportsVision;
         AliasUtf8 = Encoding.UTF8.GetBytes(alias);
         ReplacementJsonUtf8 = Encoding.UTF8.GetBytes($"\"{upstreamModel}\"");
     }
@@ -48,6 +50,8 @@ public sealed class ModelRoute
     public int? MaxOutputTokens { get; }
 
     public bool SupportsReasoning { get; }
+
+    public bool SupportsVision { get; }
 
     internal byte[] AliasUtf8 { get; }
 

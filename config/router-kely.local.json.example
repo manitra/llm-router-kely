@@ -24,7 +24,8 @@
         "outputNanoUsdPerMillion": 1200000000,
         "maxInputTokens": 1048576,
         "maxOutputTokens": 393216,
-        "supportsReasoning": true
+        "supportsReasoning": true,
+        "supportsVision": true
       },
       {
         "alias": "deepseek-pro",
@@ -34,7 +35,8 @@
         "outputNanoUsdPerMillion": 3960000000,
         "maxInputTokens": 1048576,
         "maxOutputTokens": 393216,
-        "supportsReasoning": true
+        "supportsReasoning": true,
+        "supportsVision": false
       }
     ],
     "dailyQuotaNanoUsd": null,

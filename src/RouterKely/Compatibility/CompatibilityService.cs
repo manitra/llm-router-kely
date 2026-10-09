@@ -63,6 +63,8 @@ public sealed class CompatibilityService
             writer.WriteBoolean("supports_function_calling", true);
             writer.WriteBoolean("supports_tool_choice", true);
             writer.WriteBoolean("supports_reasoning", route.SupportsReasoning);
+            writer.WriteBoolean("supports_vision", route.SupportsVision);
+            writer.WriteBoolean("supports_image_input", route.SupportsVision);
             writer.WriteStartArray("supported_openai_params");
             writer.WriteStringValue("max_tokens");
             writer.WriteStringValue("stream");

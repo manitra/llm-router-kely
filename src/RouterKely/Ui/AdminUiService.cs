@@ -498,6 +498,9 @@ public sealed class AdminUiService
             html.Append("<label><input type=\"checkbox\" name=\"").Append(field).Append("supportsReasoning\" value=\"true\"")
                 .Append(model.SupportsReasoning ? " checked" : string.Empty)
                 .Append("> Supports reasoning</label>");
+            html.Append("<label><input type=\"checkbox\" name=\"").Append(field).Append("supportsVision\" value=\"true\"")
+                .Append(model.SupportsVision ? " checked" : string.Empty)
+                .Append("> Supports images</label>");
             if (form.Models.Length > 1)
             {
                 // formnovalidate keeps the round-trip working while other rows are still incomplete.

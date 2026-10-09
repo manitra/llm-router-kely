@@ -131,6 +131,17 @@ public sealed class RouterRuntimeTests : IDisposable
         Assert.Equal("/data/usage", runtime.Current.Configuration.Statistics.PersistenceDirectoryPath);
     }
 
+    [Fact]
+    public void CreateRoutesCarriesTheVisionCapability()
+    {
+        WriteConfiguration(Config(
+            """{ "alias": "fast", "upstreamModel": "deepseek-flash", "inputNanoUsdPerMillion": 1, "cachedInputNanoUsdPerMillion": 0, "outputNanoUsdPerMillion": 2, "supportsVision": true }"""));
+
+        ModelRoute route = Assert.Single(RouterRuntime.CreateRoutes(LocalConfiguration.Load(_path).RouterKely));
+
+        Assert.True(route.SupportsVision);
+    }
+
     private (RouterRuntime Runtime, ApiKeyAuthenticator Authenticator, UsageAccumulator Usage) Compose(
         IdentitySnapshot fileIdentities)
     {

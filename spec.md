@@ -63,6 +63,7 @@ These choices resolve ambiguity and are not implementation options for the MVP.
 | Upstreams | One DeepSeek base URL and API credential. |
 | Models | A configurable list of public aliases, between one and 64 rows. The shipped default defines two: `deepseek-fast` and `deepseek-pro`. |
 | Default mapping | `deepseek-fast` → `deepseek-flash`; `deepseek-pro` → `deepseek-v4-pro`. Aliases, upstream IDs, prices, and token caps are all editable. |
+| Model capabilities | Each alias declares the upstream model's behavior itself: `supportsReasoning` and `supportsVision` (image input). They are metadata for capability discovery only; the router never inspects request content. The shipped default marks `deepseek-fast` vision-capable and `deepseek-pro` text-only, matching the DeepSeek API. |
 | Inference protocols | OpenAI-compatible Chat Completions and Responses request forwarding. |
 | Response behavior | Preserve upstream status, body bytes, and streaming behavior; do not translate response bodies. |
 | Identity state | Default: one atomically replaced configuration file containing users, quotas, and key hashes, plus one environment-supplied administrator key. |
@@ -460,7 +461,7 @@ A server-rendered configuration editor at `/ui/admin/config` exposes the runtime
 
 Four settings are bound to a fixed resource and cannot be replaced while the process runs: the listener address and the upstream connection pool/process concurrency limit, the statistics flush timer and retention, and the identity file path and capacity. The save response always names the ones it could not apply, and says so explicitly when there are none, so the page never claims a change is live when it is not.
 
-The model list is variable-length. Its rows are posted with indexed names (`models[0].alias`, `models[1].upstreamModel`, …) so any number of rows round-trips without positional guessing; an unchecked `supportsReasoning` checkbox is simply absent for its own index and never shifts later rows. Each row carries a `Remove model #N` button and the fieldset carries an `Add model` button; both post the whole form to `/ui/actions/config/models` with `formnovalidate`, which adds or drops one row and re-renders the editor without saving, so the operator can review every value before committing with the single `Save configuration` button. The last remaining row cannot be removed and the list cannot exceed 64 rows; both limits are enforced by the same validation the startup path runs.
+The model list is variable-length. Its rows are posted with indexed names (`models[0].alias`, `models[1].upstreamModel`, …) so any number of rows round-trips without positional guessing; an unchecked capability checkbox (`supportsReasoning`, `supportsVision`) is simply absent for its own index and never shifts later rows. Each row carries a `Remove model #N` button and the fieldset carries an `Add model` button; both post the whole form to `/ui/actions/config/models` with `formnovalidate`, which adds or drops one row and re-renders the editor without saving, so the operator can review every value before committing with the single `Save configuration` button. The last remaining row cannot be removed and the list cannot exceed 64 rows; both limits are enforced by the same validation the startup path runs.
 
 Every administration page — the user list, the add/edit user form, the key-created page, the configuration editor, and the usage page — begins with the same navigation element, rendered without JavaScript as a `<details>` disclosure whose summary reads `☰ Menu` and whose list links to Users, Config, and Usage and ends with the sign-out action. Placing the menu first and keeping sign-out inside it means every page exposes the same controls in the same position, and the user pages need no separate back link because the menu already links to the user list. It needs no script, no `unsafe-inline` style, and no stylesheet beyond the vendored Pico CSS.
 
@@ -797,7 +798,7 @@ Both paths return the same authenticated response. The response contains a top-l
 - `litellm_params.model`: the configured upstream model identifier, with no credential or internal host data;
 - `model_info.id`: a stable deterministic identifier derived from the alias;
 - configured context/output limits and per-token input/cache/output prices;
-- `litellm_provider: "deepseek"`, `mode: "chat"`, and the supported capability/parameter flags.
+- `litellm_provider: "deepseek"`, `mode: "chat"`, and the capability flags `supports_system_messages`, `supports_function_calling`, `supports_tool_choice`, `supports_reasoning`, `supports_vision` and `supports_image_input`. The two image flags always carry the same value, because that is how LiteLLM's model registry renders one image capability under both names.
 
 Prices are JSON USD-per-token numbers derived from the authoritative integer nanoUSD-per-million-token configuration. This endpoint performs no upstream or statistics-provider I/O.
 
@@ -837,6 +838,14 @@ Accept `start_date` and `end_date` as inclusive UTC `YYYY-MM-DD` dates, defaulti
 
 The default provider returns only retained in-memory days. A newly started process therefore returns an empty `results` array until observed inference completes and the background aggregate pump publishes a batch. The inference path never calls this endpoint or the statistics provider.
 
+### 14.9 Known upstream constraint: `reasoning_content` in thinking mode
+
+DeepSeek enables thinking mode by default for `deepseek-flash` and `deepseek-v4-pro`. When a request carries `tools`, the upstream requires the `reasoning_content` of every earlier assistant turn to be echoed back — *even for turns that performed no tool call* — and otherwise answers `400` with `The reasoning_content in the thinking mode must be passed back to the API`. OpenAI's Chat Completions schema has no such field, so an OpenAI-compatible client deserializes the assistant message, drops the field, and fails on the second tool turn.
+
+LLM Router Kely forwards the client's bytes unchanged (section 7), so it returns that upstream `400` verbatim and logs the reason; it does not repair the client's request. LiteLLM hides the same failure by rewriting the request — promoting a stored `reasoning_content` when it has one, otherwise injecting a single space, which its own source warns "may silently degrade multi-turn response quality". That is a request-side runtime fallback that hides a broken client contract, so it is deliberately not emulated here (sections 7.1 and 20).
+
+Remedies, in order of preference: use a client that round-trips `reasoning_content`; failing that, have the client send `reasoning_effort: "none"` (equivalently `thinking: {"type": "disabled"}`) with its tool calls, which turns thinking mode off and removes the requirement; otherwise the alias serves only requests without `tools`. Amending the router instead would mean an opt-in, per-alias request rewrite that buffers the full body, which contradicts section 7.1 and is therefore an explicit product decision rather than a silent fallback.
+
 ## 15. Configuration
 
 Runtime configuration is read at startup from `appsettings.json` plus environment variables. Secrets MUST come from environment variables or mounted secret files, not the image. The identity file may be atomically replaced and reloaded without restarting. A save from the admin UI re-reads and re-validates the configuration file and swaps the running model, upstream and limit values on the next request; only the listener, the connection pool and process concurrency limit, statistics flush, retention and durable-store directory, and the identity file path and capacity still require a restart (section 10.1).
@@ -875,14 +884,22 @@ Example:
         "UpstreamModel": "deepseek-flash",
         "InputNanoUsdPerMillion": 300000000,
         "CachedInputNanoUsdPerMillion": 6000000,
-        "OutputNanoUsdPerMillion": 1200000000
+        "OutputNanoUsdPerMillion": 1200000000,
+        "MaxInputTokens": 1048576,
+        "MaxOutputTokens": 393216,
+        "SupportsReasoning": true,
+        "SupportsVision": true
       },
       {
         "Alias": "deepseek-pro",
         "UpstreamModel": "deepseek-v4-pro",
         "InputNanoUsdPerMillion": 1320000000,
         "CachedInputNanoUsdPerMillion": 44000000,
-        "OutputNanoUsdPerMillion": 3960000000
+        "OutputNanoUsdPerMillion": 3960000000,
+        "MaxInputTokens": 1048576,
+        "MaxOutputTokens": 393216,
+        "SupportsReasoning": true,
+        "SupportsVision": false
       }
     ],
     "MaxRequestBodyBytes": 33554432,

@@ -181,6 +181,47 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     }
 
     [Fact]
+    public void FromFormReadsVisionSupportIndependentlyPerRow()
+    {
+        var form = new FormCollection(new Dictionary<string, StringValues>
+        {
+            ["models[0].alias"] = "fast",
+            ["models[0].upstreamModel"] = "deepseek-flash",
+            ["models[0].input"] = "1",
+            ["models[0].cachedInput"] = "0",
+            ["models[0].output"] = "2",
+            ["models[0].supportsVision"] = "true",
+            ["models[1].alias"] = "pro",
+            ["models[1].upstreamModel"] = "deepseek-v4-pro",
+            ["models[1].input"] = "3",
+            ["models[1].cachedInput"] = "0",
+            ["models[1].output"] = "4",
+        });
+
+        ConfigForm parsed = ConfigurationAdminService.FromForm(form);
+
+        Assert.True(parsed.Models[0].SupportsVision);
+        Assert.False(parsed.Models[1].SupportsVision);
+    }
+
+    [Fact]
+    public void SaveRoundTripsVisionSupportThroughDisk()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+
+        // The shipped default marks only the multimodal Flash model as vision-capable.
+        Assert.True(form.Models[0].SupportsVision);
+        Assert.False(form.Models[1].SupportsVision);
+
+        form.Models[1].SupportsVision = true;
+        service.Save(form);
+
+        Assert.True(service.LoadRaw().RouterKely.Models[1].SupportsVision);
+    }
+
+    [Fact]
     public void TryAddAndRemoveModelKeepAtLeastOneRowAndRespectTheCap()
     {
         var form = new ConfigForm { Models = [new ConfigModelForm { Alias = "a", UpstreamModel = "b" }] };

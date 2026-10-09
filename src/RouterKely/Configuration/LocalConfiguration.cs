@@ -293,6 +293,8 @@ public sealed record ModelConfiguration
     public int? MaxOutputTokens { get; init; }
 
     public bool SupportsReasoning { get; init; }
+
+    public bool SupportsVision { get; init; }
 }
 
 public sealed class StatisticsConfiguration
