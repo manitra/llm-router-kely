@@ -105,6 +105,25 @@ public sealed class ProxyServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReasoningContentAndToolCallsInMessagesAreForwardedUnchanged()
+    {
+        // DeepSeek thinking mode rejects a follow-up that drops the previous assistant turn's
+        // reasoning_content. The rewrite must therefore leave messages untouched: a transparent
+        // proxy cannot reconstruct reasoning the client failed to send.
+        const string body =
+            """{"model":"fast","messages":[{"role":"assistant","reasoning_content":"step 1","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}],"tools":[]}""";
+        var capture = new CapturingHandler();
+        (ProxyService proxy, _) = Compose(capture);
+        DefaultHttpContext context = CreateRequest(body);
+
+        await proxy.ProxyChatCompletionsAsync(context);
+
+        Assert.Equal(
+            body.Replace("\"model\":\"fast\"", "\"model\":\"deepseek-chat\""),
+            capture.Body);
+    }
+
+    [Fact]
     public async Task ChunkedClientRequestIsForwardedWithoutAContentLength()
     {
         var capture = new CapturingHandler();
@@ -167,16 +186,16 @@ public sealed class ProxyServiceTests : IDisposable
         return (proxy, logger);
     }
 
-    private static DefaultHttpContext CreateRequest()
+    private static DefaultHttpContext CreateRequest(string? body = null)
     {
-        byte[] body = Encoding.UTF8.GetBytes(RequestBody);
+        byte[] bytes = Encoding.UTF8.GetBytes(body ?? RequestBody);
         var context = new DefaultHttpContext();
         context.Request.Method = "POST";
         context.Request.Path = "/v1/chat/completions";
         context.Request.ContentType = "application/json";
         context.Request.Headers.Authorization = $"Bearer {AdminKey}";
-        context.Request.ContentLength = body.Length;
-        context.Request.Body = new MemoryStream(body);
+        context.Request.ContentLength = bytes.Length;
+        context.Request.Body = new MemoryStream(bytes);
         context.Response.Body = new MemoryStream();
         return context;
     }
