@@ -14,7 +14,9 @@ public sealed class ModelRoute
         int? maxInputTokens = null,
         int? maxOutputTokens = null,
         bool supportsReasoning = false,
-        bool supportsVision = false)
+        bool supportsVision = false,
+        string[]? reasoningEffortLevels = null,
+        int? maxContextTokens = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(alias);
         ArgumentException.ThrowIfNullOrWhiteSpace(upstreamModel);
@@ -29,6 +31,8 @@ public sealed class ModelRoute
         MaxOutputTokens = maxOutputTokens;
         SupportsReasoning = supportsReasoning;
         SupportsVision = supportsVision;
+        ReasoningEffortLevels = reasoningEffortLevels;
+        MaxContextTokens = maxContextTokens;
         AliasUtf8 = Encoding.UTF8.GetBytes(alias);
         ReplacementJsonUtf8 = Encoding.UTF8.GetBytes($"\"{upstreamModel}\"");
     }
@@ -52,6 +56,30 @@ public sealed class ModelRoute
     public bool SupportsReasoning { get; }
 
     public bool SupportsVision { get; }
+
+    /// <summary>The reasoning-effort levels advertised for this route, or null to omit them.</summary>
+    public string[]? ReasoningEffortLevels { get; }
+
+    /// <summary>
+    /// The input budget that stays jointly satisfiable with <see cref="MaxOutputTokens"/>.
+    /// The upstream counts prompt and completion tokens against one context window, so a client
+    /// that reserves <see cref="MaxOutputTokens"/> as its completion allowance may only send
+    /// <c>context - output</c> prompt tokens. Clients derive their request budget from the
+    /// advertised pair, so the advertised pair must not exceed the upstream window.
+    /// </summary>
+    public int? EffectiveMaxInputTokens
+    {
+        get
+        {
+            if (MaxContextTokens is not { } context || MaxOutputTokens is not { } output)
+                return MaxInputTokens;
+            int affordable = Math.Max(1, context - output);
+            return MaxInputTokens is int input ? Math.Min(input, affordable) : affordable;
+        }
+    }
+
+    /// <summary>The upstream context window shared by prompt and completion tokens.</summary>
+    public int? MaxContextTokens { get; }
 
     internal byte[] AliasUtf8 { get; }
 

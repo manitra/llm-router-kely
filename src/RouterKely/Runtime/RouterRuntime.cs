@@ -83,7 +83,9 @@ public sealed class RouterRuntime
             model.MaxInputTokens,
             model.MaxOutputTokens,
             model.SupportsReasoning,
-            model.SupportsVision))
+            model.SupportsVision,
+            model.ReasoningEffortLevels,
+            model.MaxContextTokens))
         .ToArray();
 
     public static IdentityUser CreateEnvironmentAdministrator(RouterConfiguration configuration) => new(

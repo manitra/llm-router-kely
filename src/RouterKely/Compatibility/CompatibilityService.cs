@@ -52,7 +52,7 @@ public sealed class CompatibilityService
             writer.WriteBoolean("db_model", false);
             writer.WriteString("key", route.UpstreamModel);
             WriteNullableNumber(writer, "max_tokens", route.MaxOutputTokens);
-            WriteNullableNumber(writer, "max_input_tokens", route.MaxInputTokens);
+            WriteNullableNumber(writer, "max_input_tokens", route.EffectiveMaxInputTokens);
             WriteNullableNumber(writer, "max_output_tokens", route.MaxOutputTokens);
             writer.WriteNumber("input_cost_per_token", PerTokenUsd(route.InputNanoUsdPerMillion));
             writer.WriteNumber("cache_read_input_token_cost", PerTokenUsd(route.CachedInputNanoUsdPerMillion));
@@ -74,7 +74,16 @@ public sealed class CompatibilityService
             writer.WriteStringValue("tools");
             writer.WriteStringValue("tool_choice");
             writer.WriteStringValue("response_format");
+            if (route.SupportsReasoning)
+                writer.WriteStringValue("reasoning_effort");
             writer.WriteEndArray();
+            if (route.ReasoningEffortLevels is { Length: > 0 } levels)
+            {
+                writer.WriteStartArray("reasoning_effort_levels");
+                foreach (string level in levels)
+                    writer.WriteStringValue(level);
+                writer.WriteEndArray();
+            }
             writer.WriteEndObject();
             writer.WriteEndObject();
         }

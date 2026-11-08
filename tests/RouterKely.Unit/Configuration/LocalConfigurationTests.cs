@@ -130,13 +130,63 @@ public sealed class LocalConfigurationTests : IDisposable
         Assert.Contains(UpstreamEnvVar, exception.Message);
     }
 
-    private void Seed()
+    [Fact]
+    public void LoadRejectsATokenBudgetThatExceedsTheContextWindow()
+    {
+        // The upstream counts prompt and completion tokens against one window. Advertising an
+        // input budget that does not fit alongside the output budget makes the client send a
+        // request the upstream rejects with a 400.
+        Seed(
+            """
+                    ,
+                    "maxContextTokens": 1048576,
+                    "maxInputTokens": 1048576,
+                    "maxOutputTokens": 393216
+            """);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => LocalConfiguration.Load(_tempPath));
+        Assert.Contains("MaxContextTokens", exception.Message);
+    }
+
+    [Fact]
+    public void LoadRejectsAModelThatDeclaresTokenLimitsWithoutAContextWindow()
+    {
+        Seed(
+            """
+                    ,
+                    "maxInputTokens": 655360,
+                    "maxOutputTokens": 393216
+            """);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => LocalConfiguration.Load(_tempPath));
+        Assert.Contains("MaxContextTokens", exception.Message);
+    }
+
+    [Fact]
+    public void LoadAcceptsATokenBudgetThatFitsTheContextWindow()
+    {
+        Seed(
+            """
+                    ,
+                    "maxContextTokens": 1048576,
+                    "maxInputTokens": 655360,
+                    "maxOutputTokens": 393216
+            """);
+
+        LocalConfiguration loaded = LocalConfiguration.Load(_tempPath);
+
+        Assert.Equal(1048576, loaded.RouterKely.Models[0].MaxContextTokens);
+        Assert.Equal(655360, loaded.RouterKely.Models[0].MaxInputTokens);
+        Assert.Equal(393216, loaded.RouterKely.Models[0].MaxOutputTokens);
+    }
+
+    private void Seed(string? modelTokenFields = null)
     {
         // Source-generated deserialization does not preserve property initializer
         // defaults, so a config that omits a field deserializes to 0/null. Keep this
         // fixture complete, matching the shipped example, so it exercises the
         // documented configuration instead of that gap.
-        const string template = """
+        string template = """
             {
               "routerKely": {
                 "listenUrl": "http://127.0.0.1:8080",
@@ -161,6 +211,7 @@ public sealed class LocalConfigurationTests : IDisposable
                     "inputNanoUsdPerMillion": 0,
                     "cachedInputNanoUsdPerMillion": 0,
                     "outputNanoUsdPerMillion": 0
+                    MODEL_TOKEN_FIELDS
                   }
                 ],
                 "statistics": {
@@ -175,8 +226,10 @@ public sealed class LocalConfigurationTests : IDisposable
               }
             }
             """;
-        File.WriteAllText(_tempPath, template
+        string content = template
+            .Replace("MODEL_TOKEN_FIELDS", modelTokenFields ?? string.Empty, StringComparison.Ordinal)
             .Replace("ADMIN_VAR", AdminEnvVar, StringComparison.Ordinal)
-            .Replace("UPSTREAM_VAR", UpstreamEnvVar, StringComparison.Ordinal));
+            .Replace("UPSTREAM_VAR", UpstreamEnvVar, StringComparison.Ordinal);
+        File.WriteAllText(_tempPath, content);
     }
 }

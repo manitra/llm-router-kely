@@ -221,6 +221,8 @@ public sealed class RouterConfiguration
             throw new InvalidOperationException("Model prices cannot be negative.");
         if (Models.Select(model => model.Alias).Distinct(StringComparer.Ordinal).Count() != Models.Length)
             throw new InvalidOperationException("Model aliases must be unique.");
+        foreach (ModelConfiguration model in Models)
+            ValidateTokenBudget(model);
         if (DailyQuotaNanoUsd < 0)
             throw new InvalidOperationException("DailyQuotaNanoUsd cannot be negative.");
         Identity.Validate();
@@ -235,6 +237,60 @@ public sealed class RouterConfiguration
             throw new InvalidOperationException(
                 "MaxConcurrentRequestsPerUser must be between 1 and MaxConcurrentRequests.");
         Statistics.Validate();
+    }
+
+    /// <summary>
+    /// Rejects a token budget that cannot be satisfied by the upstream context window. The
+    /// upstream counts prompt and completion tokens against one window, so the advertised input
+    /// and output budgets must fit inside it together. Publishing a pair that does not fit makes
+    /// clients reserve more than the window holds, which the upstream rejects with a 400 after
+    /// the request has already been accepted.
+    /// </summary>
+    private static void ValidateTokenBudget(ModelConfiguration model)
+    {
+        bool declaresAnyLimit =
+            model.MaxContextTokens is not null ||
+            model.MaxInputTokens is not null ||
+            model.MaxOutputTokens is not null;
+
+        if (!declaresAnyLimit)
+        {
+            if (model.ReasoningEffortLevels is not null)
+                throw new InvalidOperationException(
+                    $"Model '{model.Alias}' sets ReasoningEffortLevels but does not support reasoning.");
+            return;
+        }
+
+        if (model.MaxContextTokens is not { } context)
+            throw new InvalidOperationException(
+                $"Model '{model.Alias}' requires MaxContextTokens so its input and output budgets stay jointly satisfiable.");
+        if (context < 1)
+            throw new InvalidOperationException($"Model '{model.Alias}' MaxContextTokens must be positive.");
+        if (model.MaxOutputTokens is not { } output)
+            throw new InvalidOperationException($"Model '{model.Alias}' requires MaxOutputTokens.");
+        if (output < 1)
+            throw new InvalidOperationException($"Model '{model.Alias}' MaxOutputTokens must be positive.");
+        if (output > context)
+            throw new InvalidOperationException(
+                $"Model '{model.Alias}' MaxOutputTokens ({output}) cannot exceed MaxContextTokens ({context}).");
+        if (model.MaxInputTokens is { } input)
+        {
+            if (input < 1)
+                throw new InvalidOperationException($"Model '{model.Alias}' MaxInputTokens must be positive.");
+            if (input + output > context)
+                throw new InvalidOperationException(
+                    $"Model '{model.Alias}' MaxInputTokens ({input}) plus MaxOutputTokens ({output}) exceeds " +
+                    $"MaxContextTokens ({context}); the advertised budgets must fit the context window together.");
+        }
+        if (model.ReasoningEffortLevels is { } levels)
+        {
+            if (levels.Length == 0 || levels.Any(string.IsNullOrWhiteSpace))
+                throw new InvalidOperationException(
+                    $"Model '{model.Alias}' ReasoningEffortLevels must be non-empty and contain no blank entries.");
+            if (!model.SupportsReasoning)
+                throw new InvalidOperationException(
+                    $"Model '{model.Alias}' sets ReasoningEffortLevels but does not support reasoning.");
+        }
     }
 }
 
@@ -288,13 +344,31 @@ public sealed record ModelConfiguration
 
     public long OutputNanoUsdPerMillion { get; init; }
 
+    /// <summary>
+    /// The upstream context window, counted over prompt and completion tokens together.
+    /// Required whenever a token limit is set, because it is the only bound that makes the
+    /// advertised input and output budgets jointly satisfiable.
+    /// </summary>
+    public int? MaxContextTokens { get; init; }
+
+    /// <summary>
+    /// The advertised prompt budget. When omitted it is derived from the context window and the
+    /// output budget, so that the advertised pair always fits the window.
+    /// </summary>
     public int? MaxInputTokens { get; init; }
 
+    /// <summary>The advertised completion budget.</summary>
     public int? MaxOutputTokens { get; init; }
 
     public bool SupportsReasoning { get; init; }
 
     public bool SupportsVision { get; init; }
+
+    /// <summary>
+    /// The reasoning-effort levels advertised for this model. Omitted when the model does not
+    /// support reasoning.
+    /// </summary>
+    public string[]? ReasoningEffortLevels { get; init; }
 }
 
 public sealed class StatisticsConfiguration

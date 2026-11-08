@@ -457,7 +457,7 @@ The UI uses the pinned Pico CSS 2.1.1 classless build. Its minified stylesheet i
 
 The initial administration UI is intentionally one server-rendered users table plus one upsert user form. The list page contains no forms other than sign-out; every row offers an `Edit` link and the table footer offers an `Add user` link, and both open the same form at `/ui/admin/users/new` or `/ui/admin/users/{id}`. `POST /ui/actions/users` upserts: an absent `id` creates a user, a present `id` updates name, email, quota, and enabled state. “Remove user” means disabling the user via that form; “remove key” means revoking the key. Neither operation physically deletes identity history. The user form generates a replacement key and displays its plaintext exactly once. The environment administrator is visible but cannot be edited, disabled, or issued file-backed keys.
 
-A server-rendered configuration editor at `/ui/admin/config` exposes the runtime configuration file: `listenUrl`, `clientApiKey`, `upstream.baseUrl`, `upstream.apiKey`, `upstream.allowInsecureLoopback`, identity limits, model aliases/upstream IDs/prices/token caps/capability flags, default daily quota, body/prefix/concurrency limits, and statistics retention. The form POSTs to `/ui/actions/config`, which atomically writes a temporary file in the same directory and renames it over the original. It then re-reads and re-validates that file and swaps the running snapshot, so **a save takes effect on the next inference request: no restart and no dropped request**. Models, upstream base URL and key, the environment administrator credential, per-user daily quotas, and the body/prefix limits all change live. A save whose file is invalid is refused before anything is written; a file that can be written but not started with is reported as `Saved to disk, but not applied` rather than leaving the operator to discover it at the next restart. The one read per request is a single volatile snapshot reference, so reload support costs nothing measurable on the data plane. Secret fields are not redacted; the editor shows their literal value (typically a `${NAME}` reference) so the operator can see exactly which environment variable must be configured in the platform. The editor requires an admin session, the same-origin/CSRF guard, and signed-in role as every other control-plane action.
+A server-rendered configuration editor at `/ui/admin/config` exposes the runtime configuration file: `listenUrl`, `clientApiKey`, `upstream.baseUrl`, `upstream.apiKey`, `upstream.allowInsecureLoopback`, identity limits, model aliases/upstream IDs/prices/token caps/capability flags/reasoning effort levels, default daily quota, body/prefix/concurrency limits, and statistics retention. The form POSTs to `/ui/actions/config`, which atomically writes a temporary file in the same directory and renames it over the original. It then re-reads and re-validates that file and swaps the running snapshot, so **a save takes effect on the next inference request: no restart and no dropped request**. Models, upstream base URL and key, the environment administrator credential, per-user daily quotas, and the body/prefix limits all change live. A save whose file is invalid is refused before anything is written; a file that can be written but not started with is reported as `Saved to disk, but not applied` rather than leaving the operator to discover it at the next restart. The one read per request is a single volatile snapshot reference, so reload support costs nothing measurable on the data plane. Secret fields are not redacted; the editor shows their literal value (typically a `${NAME}` reference) so the operator can see exactly which environment variable must be configured in the platform. The editor requires an admin session, the same-origin/CSRF guard, and signed-in role as every other control-plane action.
 
 Four settings are bound to a fixed resource and cannot be replaced while the process runs: the listener address and the upstream connection pool/process concurrency limit, the statistics flush timer and retention, and the identity file path and capacity. The save response always names the ones it could not apply, and says so explicitly when there are none, so the page never claims a change is live when it is not.
 
@@ -802,6 +802,16 @@ Both paths return the same authenticated response. The response contains a top-l
 
 Prices are JSON USD-per-token numbers derived from the authoritative integer nanoUSD-per-million-token configuration. This endpoint performs no upstream or statistics-provider I/O.
 
+#### The advertised token budget is jointly satisfiable
+
+The upstream counts prompt tokens and completion tokens against **one** context window, so the advertised input and output budgets must fit inside it together: `max_input_tokens + max_output_tokens <= max_context_tokens`. A client derives its request budget from the advertised pair — it reserves `max_output_tokens` as the completion allowance and accepts prompts up to `max_input_tokens` — so a pair that does not fit makes the client send a request the upstream rejects with `400` *after* the client has already accepted it.
+
+LLM Router Kely therefore publishes `max_input_tokens` as the smaller of the configured input budget and `max_context_tokens - max_output_tokens`, and configuration validation refuses any budget that cannot be satisfied (section 15). A model that declares no token limits publishes no limit at all.
+
+#### Reasoning effort is advertised
+
+A model that supports reasoning advertises `reasoning_effort` in `supported_openai_params` and publishes `model_info.reasoning_effort_levels` with the levels it accepts. Without both, a client cannot offer the picker and falls back to sending whatever the upstream defaults to — which for DeepSeek is thinking mode, with its slow first token and its `reasoning_content` round-trip requirement (section 14.9). The upstream accepts `none`, which turns thinking mode off; publishing it lets a client select the fast, non-thinking path. The router forwards the chosen `reasoning_effort` verbatim, because it forwards request bodies unchanged (section 7).
+
 ### 14.8 `GET /user/daily/activity`
 
 Accept `start_date` and `end_date` as inclusive UTC `YYYY-MM-DD` dates, defaulting to the most recent 30 days and rejecting reversed or greater-than-366-day ranges. The response follows the observed LiteLLM aggregate shape:
@@ -846,6 +856,8 @@ LLM Router Kely forwards the client's bytes unchanged (section 7), so it returns
 
 Remedies, in order of preference: use a client that round-trips `reasoning_content`; failing that, have the client send `reasoning_effort: "none"` (equivalently `thinking: {"type": "disabled"}`) with its tool calls, which turns thinking mode off and removes the requirement; otherwise the alias serves only requests without `tools`. Amending the router instead would mean an opt-in, per-alias request rewrite that buffers the full body, which contradicts section 7.1 and is therefore an explicit product decision rather than a silent fallback.
 
+The router makes that remedy reachable: a model that supports reasoning publishes `reasoning_effort` and its effort levels (section 14.7), so a client can offer `none` and the upstream accepts it verbatim.
+
 ## 15. Configuration
 
 Runtime configuration is read at startup from `appsettings.json` plus environment variables. Secrets MUST come from environment variables or mounted secret files, not the image. The identity file may be atomically replaced and reloaded without restarting. A save from the admin UI re-reads and re-validates the configuration file and swaps the running model, upstream and limit values on the next request; only the listener, the connection pool and process concurrency limit, statistics flush, retention and durable-store directory, and the identity file path and capacity still require a restart (section 10.1).
@@ -885,10 +897,12 @@ Example:
         "InputNanoUsdPerMillion": 300000000,
         "CachedInputNanoUsdPerMillion": 6000000,
         "OutputNanoUsdPerMillion": 1200000000,
-        "MaxInputTokens": 1048576,
+        "MaxContextTokens": 1048576,
+        "MaxInputTokens": 655360,
         "MaxOutputTokens": 393216,
         "SupportsReasoning": true,
-        "SupportsVision": true
+        "SupportsVision": true,
+        "ReasoningEffortLevels": ["none", "low", "high", "max"]
       },
       {
         "Alias": "deepseek-pro",
@@ -896,10 +910,12 @@ Example:
         "InputNanoUsdPerMillion": 1320000000,
         "CachedInputNanoUsdPerMillion": 44000000,
         "OutputNanoUsdPerMillion": 3960000000,
-        "MaxInputTokens": 1048576,
+        "MaxContextTokens": 1048576,
+        "MaxInputTokens": 655360,
         "MaxOutputTokens": 393216,
         "SupportsReasoning": true,
-        "SupportsVision": false
+        "SupportsVision": false,
+        "ReasoningEffortLevels": ["none", "low", "high", "max"]
       }
     ],
     "MaxRequestBodyBytes": 33554432,
@@ -922,6 +938,8 @@ Example:
 ```
 
 Zero prices are permitted only in development. Production startup fails if any enabled model lacks reviewed, nonnegative prices. Pricing is operator-supplied; LLM Router Kely never scrapes mutable provider pricing. The shipped defaults use DeepSeek's peak rates (off-peak is billed at half the peak rate), which keeps the quota guardrail conservative, plus DeepSeek's published 1,048,576-token context and 393,216-token maximum output caps.
+
+`MaxContextTokens` is the upstream's context window, counted over prompt and completion tokens together. It is required whenever a model declares any token limit, because it is the only bound that makes the advertised input and output budgets jointly satisfiable (section 14.7). Startup and configuration saves refuse a budget whose input and output caps exceed the window together, and refuse a `ReasoningEffortLevels` list on a model that does not support reasoning. `ReasoningEffortLevels` lists the effort levels a client may offer; it is published as `model_info.reasoning_effort_levels`.
 
 `statistics.persistenceDirectoryPath` is the durable-statistics switch (section 12.5). Empty or absent keeps the default in-memory-only behaviour; a value names the directory that holds the per-day usage files, relative to the configuration file's directory when not rooted. It is restart-only, and the container should point it at the writable volume, for example `/data/usage`.
 
@@ -1310,6 +1328,8 @@ The MVP is releasable only when all items pass.
 - [ ] Plaintext keys are shown once and cannot be recovered.
 - [ ] Default current-day usage and quota consumption reset on restart with the default statistics provider, and the UI labels this behavior clearly; with `statistics.persistenceDirectoryPath` set, both are restored before readiness and the usage page says so.
 - [ ] LiteLLM profile endpoints return documented schemas and pass captured coding-client fixtures.
+- [ ] The advertised token budget is jointly satisfiable: `max_input_tokens + max_output_tokens <= max_context_tokens`, and an unsatisfiable budget is refused at startup and on save.
+- [ ] A model that supports reasoning advertises `reasoning_effort` and its effort levels, and the upstream accepts the selected level.
 - [ ] Saving the admin configuration applies models, upstream credentials, quotas and limits without a restart, and the response names any setting that still needs one.
 - [ ] An invalid saved configuration is refused before it is written, and a reload failure leaves the previous snapshot running.
 - [ ] `/ui` primary workflows function without JavaScript.

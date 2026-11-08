@@ -222,6 +222,40 @@ public sealed class ConfigurationAdminServiceTests : IDisposable
     }
 
     [Fact]
+    public void SaveRoundTripsTheTokenBudgetAndReasoningEffortLevels()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+
+        form.Models[0].MaxContextTokens = "1048576";
+        form.Models[0].MaxInputTokens = "655360";
+        form.Models[0].MaxOutputTokens = "393216";
+        form.Models[0].ReasoningEffortLevels = "none, low, high, max";
+        service.Save(form);
+
+        ModelConfiguration saved = service.LoadRaw().RouterKely.Models[0];
+        Assert.Equal(1048576, saved.MaxContextTokens);
+        Assert.Equal(655360, saved.MaxInputTokens);
+        Assert.Equal(393216, saved.MaxOutputTokens);
+        Assert.Equal(new[] { "none", "low", "high", "max" }, saved.ReasoningEffortLevels);
+    }
+
+    [Fact]
+    public void SaveRejectsATokenBudgetThatDoesNotFitTheContextWindow()
+    {
+        Seed();
+        var service = new ConfigurationAdminService(_tempPath);
+        ConfigForm form = ConfigurationAdminService.ToForm(service.LoadRaw());
+        form.Models[0].MaxContextTokens = "1048576";
+        form.Models[0].MaxInputTokens = "1048576";
+        form.Models[0].MaxOutputTokens = "393216";
+
+        var exception = Assert.Throws<InvalidOperationException>(() => service.Save(form));
+        Assert.Contains("MaxContextTokens", exception.Message);
+    }
+
+    [Fact]
     public void TryAddAndRemoveModelKeepAtLeastOneRowAndRespectTheCap()
     {
         var form = new ConfigForm { Models = [new ConfigModelForm { Alias = "a", UpstreamModel = "b" }] };

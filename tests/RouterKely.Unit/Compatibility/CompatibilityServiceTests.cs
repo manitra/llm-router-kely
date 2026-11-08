@@ -48,6 +48,60 @@ public sealed class CompatibilityServiceTests : IDisposable
         Assert.False(models["smart"].GetProperty("model_info").GetProperty("supports_image_input").GetBoolean());
     }
 
+    [Fact]
+    public async Task ModelInfoAdvertisesAJointlySatisfiableTokenBudget()
+    {
+        // The upstream counts prompt and completion tokens against one context window, so a
+        // client that reserves the advertised output budget may only send the advertised input
+        // budget. Advertising a larger pair makes the client send a request the upstream rejects.
+        File.WriteAllText(_path, BudgetedConfig);
+        CompatibilityService service = Compose();
+        DefaultHttpContext context = CreateRequest();
+
+        await service.WriteModelInfoAsync(context);
+        await context.Response.CompleteAsync();
+
+        using JsonDocument document = JsonDocument.Parse(ReadResponseBody(context));
+        JsonElement info = document.RootElement
+            .GetProperty("data")
+            .EnumerateArray()
+            .Single()
+            .GetProperty("model_info");
+
+        int input = info.GetProperty("max_input_tokens").GetInt32();
+        int output = info.GetProperty("max_output_tokens").GetInt32();
+
+        Assert.Equal(655360, input);
+        Assert.Equal(393216, output);
+        Assert.True(input + output <= 1048576, $"advertised budget {input}+{output} exceeds the context window");
+    }
+
+    [Fact]
+    public async Task ModelInfoAdvertisesTheReasoningEffortLevelsOfAReasoningModel()
+    {
+        File.WriteAllText(_path, BudgetedConfig);
+        CompatibilityService service = Compose();
+        DefaultHttpContext context = CreateRequest();
+
+        await service.WriteModelInfoAsync(context);
+        await context.Response.CompleteAsync();
+
+        using JsonDocument document = JsonDocument.Parse(ReadResponseBody(context));
+        JsonElement info = document.RootElement
+            .GetProperty("data")
+            .EnumerateArray()
+            .Single()
+            .GetProperty("model_info");
+
+        Assert.True(info.GetProperty("supports_reasoning").GetBoolean());
+        Assert.Contains(
+            "reasoning_effort",
+            info.GetProperty("supported_openai_params").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(
+            new[] { "none", "low", "high", "max" },
+            info.GetProperty("reasoning_effort_levels").EnumerateArray().Select(value => value.GetString()));
+    }
+
     private CompatibilityService Compose()
     {
         RouterConfiguration configuration = LocalConfiguration.Load(_path).RouterKely;
@@ -120,6 +174,52 @@ public sealed class CompatibilityServiceTests : IDisposable
                 "inputNanoUsdPerMillion": 3,
                 "cachedInputNanoUsdPerMillion": 0,
                 "outputNanoUsdPerMillion": 4
+              }
+            ],
+            "dailyQuotaNanoUsd": null,
+            "statistics": {
+              "flushIntervalMilliseconds": 1000,
+              "hourlyRetentionHours": 72,
+              "dailyRetentionDays": 7
+            },
+            "maxRequestBodyBytes": 8192,
+            "maxModelPrefixBytes": 256,
+            "maxConcurrentRequests": 8,
+            "maxConcurrentRequestsPerUser": 4
+          }
+        }
+        """;
+
+    private const string BudgetedConfig = $$"""
+        {
+          "routerKely": {
+            "listenUrl": "http://127.0.0.1:18080",
+            "clientApiKey": "{{AdminKey}}",
+            "identity": {
+              "filePath": "router-kely.identities.json",
+              "maxUsers": 256,
+              "maxKeys": 1024,
+              "environmentAdminUserId": 1,
+              "environmentAdminKeyId": 1,
+              "environmentAdminName": "Admin",
+              "environmentAdminEmail": "admin@localhost"
+            },
+            "upstream": {
+              "baseUrl": "https://upstream.example/v1/",
+              "apiKey": "sk-rk-upstream-1"
+            },
+            "models": [
+              {
+                "alias": "budgeted",
+                "upstreamModel": "deepseek-v4-pro",
+                "inputNanoUsdPerMillion": 1,
+                "cachedInputNanoUsdPerMillion": 0,
+                "outputNanoUsdPerMillion": 2,
+                "maxContextTokens": 1048576,
+                "maxInputTokens": 655360,
+                "maxOutputTokens": 393216,
+                "supportsReasoning": true,
+                "reasoningEffortLevels": ["none", "low", "high", "max"]
               }
             ],
             "dailyQuotaNanoUsd": null,

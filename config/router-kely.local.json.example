@@ -22,10 +22,12 @@
         "inputNanoUsdPerMillion": 300000000,
         "cachedInputNanoUsdPerMillion": 6000000,
         "outputNanoUsdPerMillion": 1200000000,
-        "maxInputTokens": 1048576,
+        "maxContextTokens": 1048576,
+        "maxInputTokens": 655360,
         "maxOutputTokens": 393216,
         "supportsReasoning": true,
-        "supportsVision": true
+        "supportsVision": true,
+        "reasoningEffortLevels": ["none", "low", "high", "max"]
       },
       {
         "alias": "deepseek-pro",
@@ -33,10 +35,12 @@
         "inputNanoUsdPerMillion": 1320000000,
         "cachedInputNanoUsdPerMillion": 44000000,
         "outputNanoUsdPerMillion": 3960000000,
-        "maxInputTokens": 1048576,
+        "maxContextTokens": 1048576,
+        "maxInputTokens": 655360,
         "maxOutputTokens": 393216,
         "supportsReasoning": true,
-        "supportsVision": false
+        "supportsVision": false,
+        "reasoningEffortLevels": ["none", "low", "high", "max"]
       }
     ],
     "dailyQuotaNanoUsd": null,

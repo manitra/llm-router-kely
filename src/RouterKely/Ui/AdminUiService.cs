@@ -495,12 +495,18 @@ public sealed class AdminUiService
                 .Append(Encode(model.MaxInputTokens ?? string.Empty)).Append("\"></label>");
             html.Append("<label>Max output tokens <input name=\"").Append(field).Append("maxOutput\" type=\"number\" min=\"1\" value=\"")
                 .Append(Encode(model.MaxOutputTokens ?? string.Empty)).Append("\"></label>");
+            html.Append("<label>Max context tokens <input name=\"").Append(field).Append("maxContext\" type=\"number\" min=\"1\" value=\"")
+                .Append(Encode(model.MaxContextTokens ?? string.Empty)).Append("\"></label>");
             html.Append("<label><input type=\"checkbox\" name=\"").Append(field).Append("supportsReasoning\" value=\"true\"")
                 .Append(model.SupportsReasoning ? " checked" : string.Empty)
                 .Append("> Supports reasoning</label>");
             html.Append("<label><input type=\"checkbox\" name=\"").Append(field).Append("supportsVision\" value=\"true\"")
                 .Append(model.SupportsVision ? " checked" : string.Empty)
                 .Append("> Supports images</label>");
+            html.Append("<label>Reasoning effort levels <input name=\"").Append(field).Append("reasoningEffortLevels\" value=\"")
+                .Append(Encode(model.ReasoningEffortLevels ?? string.Empty)).Append("\"></label>");
+            html.Append("<p><small>Reasoning effort levels are comma-separated, for example "
+                + "<code>none, low, high, max</code>. Leave blank to omit them.</small></p>");
             if (form.Models.Length > 1)
             {
                 // formnovalidate keeps the round-trip working while other rows are still incomplete.

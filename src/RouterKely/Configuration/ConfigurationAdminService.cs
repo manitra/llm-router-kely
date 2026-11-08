@@ -72,10 +72,12 @@ public sealed class ConfigurationAdminService
                 InputNanoUsdPerMillion = ParseNonNegativeLong(entry.InputUsdPerMillion, nameof(entry.InputUsdPerMillion)),
                 CachedInputNanoUsdPerMillion = ParseNonNegativeLong(entry.CachedInputUsdPerMillion, nameof(entry.CachedInputUsdPerMillion)),
                 OutputNanoUsdPerMillion = ParseNonNegativeLong(entry.OutputUsdPerMillion, nameof(entry.OutputUsdPerMillion)),
+                MaxContextTokens = ParseOptionalPositiveInt(entry.MaxContextTokens, "Max context tokens"),
                 MaxInputTokens = ParseOptionalPositiveInt(entry.MaxInputTokens, "Max input tokens"),
                 MaxOutputTokens = ParseOptionalPositiveInt(entry.MaxOutputTokens, "Max output tokens"),
                 SupportsReasoning = entry.SupportsReasoning,
                 SupportsVision = entry.SupportsVision,
+                ReasoningEffortLevels = ParseReasoningEffortLevels(entry.ReasoningEffortLevels),
             };
         }
 
@@ -203,8 +205,12 @@ public sealed class ConfigurationAdminService
                 OutputUsdPerMillion = model.OutputNanoUsdPerMillion.ToString(CultureInfo.InvariantCulture),
                 MaxInputTokens = model.MaxInputTokens?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
                 MaxOutputTokens = model.MaxOutputTokens?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                MaxContextTokens = model.MaxContextTokens?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
                 SupportsReasoning = model.SupportsReasoning,
                 SupportsVision = model.SupportsVision,
+                ReasoningEffortLevels = model.ReasoningEffortLevels is { Length: > 0 } levels
+                    ? string.Join(", ", levels)
+                    : string.Empty,
             })
             .ToArray(),
     };
@@ -308,6 +314,7 @@ public sealed class ConfigurationAdminService
             OutputUsdPerMillion = form[prefix + "output"].ToString(),
             MaxInputTokens = NullIfBlank(form[prefix + "maxInput"].ToString()),
             MaxOutputTokens = NullIfBlank(form[prefix + "maxOutput"].ToString()),
+            MaxContextTokens = NullIfBlank(form[prefix + "maxContext"].ToString()),
             SupportsReasoning = string.Equals(
                 form[prefix + "supportsReasoning"].ToString(),
                 "true",
@@ -316,7 +323,23 @@ public sealed class ConfigurationAdminService
                 form[prefix + "supportsVision"].ToString(),
                 "true",
                 StringComparison.Ordinal),
+            ReasoningEffortLevels = NullIfBlank(form[prefix + "reasoningEffortLevels"].ToString()),
         };
+    }
+
+    /// <summary>
+    /// Parses the comma-separated reasoning-effort levels of a model row. Blank entries are
+    /// dropped so a trailing comma in the form does not produce an empty level.
+    /// </summary>
+    private static string[]? ParseReasoningEffortLevels(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        string[] levels = value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(level => level.Length > 0)
+            .ToArray();
+        return levels.Length == 0 ? null : levels;
     }
 
     private static string? NullIfBlank(string value) =>
@@ -353,6 +376,8 @@ public sealed class ConfigModelForm
     public string OutputUsdPerMillion { get; set; } = "0";
     public string? MaxInputTokens { get; set; }
     public string? MaxOutputTokens { get; set; }
+    public string? MaxContextTokens { get; set; }
     public bool SupportsReasoning { get; set; }
     public bool SupportsVision { get; set; }
+    public string? ReasoningEffortLevels { get; set; }
 }
